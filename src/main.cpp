@@ -18,7 +18,7 @@ lv_display_t *disp;
 #define TFT_ROTATION LV_DISPLAY_ROTATION_270
 #define LV_CUSTOM_FONT_DECLARE(LV_FONT_MONTSERRAT_30)
 #define LVGL_DRAW_BUF_SIZE (TFT_HOR_RES * TFT_VER_RES / 10 * (LV_COLOR_DEPTH / 8))
-#define CANVAS_DRAW_BUF_SIZE (155 * 155 * sizeof(lv_color_t))
+#define CANVAS_DRAW_BUF_SIZE (50 * 50 * sizeof(lv_color_t))
 lv_obj_t * canvasObj;
 static uint32_t draw_buf[LVGL_DRAW_BUF_SIZE / 4]; // is this supposed to be static?
 // static uint32_t buffer[LV_CANVAS_BUF_SIZE(TFT_HOR_RES, TFT_VER_RES, 8, stride_in_bytes)]
@@ -235,8 +235,8 @@ void lv_create_canvas()
   lv_draw_buf_t * canvas_draw_buf = (lv_draw_buf_t *)malloc(sizeof(lv_draw_buf_t));
   lv_draw_buf_init(
     canvas_draw_buf, 
-    300, 
-    300, 
+    50, 
+    50, 
     LV_COLOR_FORMAT_I4,
     0, 
     canvas_draw_buf_data, 
@@ -248,8 +248,9 @@ void lv_create_canvas()
     //lv_canvas_set_draw_buf(canvas, &canvas_draw_buf);
     // malloc
     lv_canvas_set_draw_buf(canvas, canvas_draw_buf);
+    lv_canvas_set_palette(canvas, 1, LV_COLOR_MAKE(0xFF,0x00,0x00));
     //lv_obj_set_size(canvas, TFT_HOR_RES, TFT_VER_RES); //GPT-ism, might not be needed.s
-    lv_canvas_fill_bg(canvas, lv_color_hex3(0xccc), LV_OPA_COVER);
+    lv_canvas_fill_bg(canvas, lv_color_make(0, 0, 1), LV_OPA_COVER);
     lv_obj_center(canvas);
 
     lv_layer_t layer;
