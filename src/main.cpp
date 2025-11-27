@@ -9,9 +9,53 @@
 // Touch
 #define CALIBRATION_FILE "/calibrationData"
 
+// Input
+#define MENU_BUTTON_PIN 0
+static unsigned long lastPress = 0;
+static unsigned int lastButtonState = 0;
+static bool alreadyPressed = false;
+#define DEBOUNCE_MILLISECONDS 50
+// Invoke the TFT_eSPI button class and create all the button objects
+TFT_eSPI_Button color[15];
+
+// Output
+
 // Display
 TFT_eSPI tft = TFT_eSPI();
 uint8_t* fb4;
+typedef enum {
+  TOOL_ERASER,  
+  TOOL_BRUSH,
+  TOOL_PENCIL,
+  TOOL_DITHER,
+  TOOL_FILL
+} draw_tool_id_t;
+/** Defines color palette for our 4-bit color frame buffer.
+ * Color palette is from https://androidarts.com/palette/16pal.htm
+*/
+uint16_t palette[16] = {
+  0x0000, // Black (0)
+  0x9CF3, // Gray (1)
+  0xFFFF, // White (2)
+  0xb926, // Red (3)
+  0xdb71, // Meat (4)
+  0x49e5, // Dark Brown (5)
+  0xa324, // Brown (6)
+  0xec46, // Orange (7)
+  0xf70d, // Yellow (8)
+  0x3249, // Dark Green (9)
+  0x4443, // Green (10)
+  0xa665, // Slime Green (11)
+  0x1926, // Night Blue (12)
+  0x02b0, // Sea Blue (13)
+  0x351d, // Sky Blue (14)
+  0xb6dd  // Cloud Blue (15)
+};
+static int currentBackgroundColorIndex = 0;
+static int currentDrawColorIndex = 11;
+static int currentBrushRadius = 5;
+#define DRAW_MENU_TOP_BAR_HEIGHT_PX 50
+#define DRAW_MENU_BOTTOM_BAR_HEIGHT_PX 50
 
 // Network
 #define LOCAL_HOSTNAME "friendbox"
@@ -24,22 +68,63 @@ String serialCommand;
 
 // Functions
 void updateDisplayWithFB();
+void calibrateDisplay(bool force);
 void drawPixelToFB(int x, int y, uint8_t colorIndex);
+void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex);
+void drawingMenu(bool show);
 
 void handleTouch() {
   uint16_t touchX, touchY;
   static uint16_t color;
 
   if (tft.getTouch(&touchX, &touchY)) {
-    Serial.print("Touch - X: ");
-    Serial.print(touchX);
-    Serial.print(" Y: ");
-    Serial.println(touchY);
+    //Serial.print("Touch - X: ");
+    //Serial.print(touchX);
+    //Serial.print(" Y: ");
+    //Serial.println(touchY);
+    //Serial.print(" Z: ");
+    //Serial.println(tft.getTouchRawZ());
     
     // Touch coordinates already match screen/framebuffer!
-    drawPixelToFB(touchX, touchY, 2);
-    tft.drawPixel(touchX, touchY, color);
-    color += 155;
+    //drawPixelToFB(touchX, touchY, 2);
+    drawBrushToFB(touchX, touchY, currentBrushRadius, currentDrawColorIndex);
+  }
+}
+
+/** This is pretty much useless as it doesn't debounce release, so it will probably
+ * just break in the future. Rewrite when necessary :)) Also not sure if this handles
+ * rollover correctly.
+ */
+void handleMenuButton() {
+  if (digitalRead(MENU_BUTTON_PIN) == LOW) /*Button Pressed*/ {
+    if (lastPress == 0) {
+      lastPress = millis();
+    }
+    if ((millis() >= (lastPress + DEBOUNCE_MILLISECONDS)) & !alreadyPressed)
+    {
+      Serial.println("Logical Press");
+      drawingMenu(true);
+      alreadyPressed = true;
+    }
+    else {return;}
+  }
+  else /*Button Released*/{
+    if (lastPress) {
+      lastPress = 0;
+      alreadyPressed = false;
+      Serial.println("Logical Release.");
+      drawingMenu(false);
+    }
+  }
+}
+
+void drawingMenu(bool show) {
+  if (show) {
+    tft.fillRect(0, 0, 480, 50, TFT_WHITE);
+    tft.fillRect(0, 270, 480, 50, TFT_WHITE);
+  }
+  else {
+    updateDisplayWithFB();
   }
 }
 
@@ -93,6 +178,19 @@ void initDisplay()
   tft.println("Welcome to FriendBox.");
   tft.println("Please wait...");
 
+  // Calibrate Touch
+  calibrateDisplay(false);
+  
+  // Allocate framebuffer in ROTATED dimensions
+  fb4 = (uint8_t*) malloc((tft.width() * tft.height()) / 2); // 76.8 KB
+  if (!fb4) {
+    Serial.println("FATAL: Framebuffer allocation failed!");
+    while(1);
+  }
+  memset(fb4, 0, (tft.width() * tft.height()) / 2);
+}
+
+void calibrateDisplay(bool force) {
   // Initialize touch
   uint16_t calibrationData[5];
   uint8_t calDataOK = 0;
@@ -117,7 +215,7 @@ void initDisplay()
       f.close();
     }
   }
-  if (calDataOK)
+  if (calDataOK && !force)
   {
     // calibration data valid
     tft.setTouch(calibrationData);
@@ -126,6 +224,13 @@ void initDisplay()
   else
   {
     // data not valid. recalibrate
+    tft.fillScreen(TFT_BLACK);
+    tft.setCursor(160, 40);
+    tft.setTextSize(3);
+    tft.drawCentreString("Touch Calibration", 240, 70, 2);
+    tft.setTextSize(2);
+    tft.drawCentreString("Press Highlighted Corners...", 240, 120, 2);
+
     tft.calibrateTouch(calibrationData, TFT_WHITE, TFT_RED, 15);
     // store data
     File f = SPIFFS.open(CALIBRATION_FILE, "w");
@@ -134,23 +239,14 @@ void initDisplay()
       f.write((const unsigned char *)calibrationData, 14);
       f.close();
     }
+    tft.fillScreen(TFT_BLACK);
+    Serial.println("Touch recalibration successful.");
   }
-  
-  // Allocate framebuffer in ROTATED dimensions
-  fb4 = (uint8_t*) malloc((tft.width() * tft.height()) / 2); // 76.8 KB
-  if (!fb4) {
-    Serial.println("FATAL: Framebuffer allocation failed!");
-    while(1);
-  }
-  memset(fb4, 0, (tft.width() * tft.height()) / 2);
 }
 
 void drawPixelToFB(int x, int y, uint8_t colorIndex)
 {
-    if (x < 0 || x >= tft.width() || y < 0 || y >= tft.height()) {
-      Serial.println("WARN: Pixel out of bounds.");
-      return;
-    }
+    if (x < 0 || x >= tft.width() || y < 0 || y >= tft.height()) return;
 
     int index = y * tft.width() + x;
     int byteIndex = index >> 1;
@@ -159,6 +255,66 @@ void drawPixelToFB(int x, int y, uint8_t colorIndex)
         fb4[byteIndex] = (fb4[byteIndex] & 0xF0) | (colorIndex & 0x0F);
     else
         fb4[byteIndex] = (fb4[byteIndex] & 0x0F) | ((colorIndex & 0x0F) << 4);
+}
+
+// Helper functions to change tool settings
+void setDrawColor(uint8_t colorIndex) {
+  if (colorIndex < 16) {
+    Serial.print("Color set to: ");
+    Serial.println(colorIndex);
+    currentDrawColorIndex = colorIndex;
+  }
+}
+
+void setBackgroundColor(uint8_t colorIndex) {
+  if (colorIndex < 16) {
+    Serial.print("Background color set to: ");
+    Serial.println(colorIndex);
+    currentBackgroundColorIndex = colorIndex;
+    tft.fillScreen(palette[colorIndex]);
+  }
+}
+
+void setBrushRadius(int radius) {
+  if (radius > 0 && radius <= 50) {
+    Serial.print("Brush radius set to: ");
+    Serial.println(radius);
+  }
+}
+
+// Draw a circle brush at x,y with given radius and color
+// Updates BOTH framebuffer and screen in real-time!
+void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex) {
+  // Draw filled circle using midpoint circle algorithm
+  for (int dy = -radius; dy <= radius; dy++) {
+    for (int dx = -radius; dx <= radius; dx++) {
+      // Check if point is inside circle
+      if (dx * dx + dy * dy <= radius * radius) {
+        int px = x + dx;
+        int py = y + dy;
+        
+        // Draw to framebuffer
+        drawPixelToFB(px, py, colorIndex);
+        
+        // Draw to screen immediately for instant feedback
+        if (px >= 0 && px < tft.width() && py >= 0 && py < tft.height()) {
+          tft.drawPixel(px, py, palette[colorIndex]);
+        }
+      }
+    }
+  }
+}
+
+void drawToolToFB(int radius, draw_tool_id_t tool, uint8_t colorIndex) {
+
+  switch (tool) 
+  {
+    case TOOL_BRUSH: 
+      break;
+    default:
+      Serial.println("WARN: Trying to draw with an invalid / not implemented tool.");
+      break;
+  }
 }
 
 void drawTest4() {
@@ -188,25 +344,6 @@ void loadImageFromSD() {
     Serial.println("Image loaded!");
   }
 }
-
-uint16_t palette[16] = {
-  0x0000, // black
-  0xFFFF, // white
-  0xF800, // red
-  0x07E0, // green
-  0x001F, // blue
-  0xFFE0, // yellow
-  0xF81F, // magenta
-  0x07FF, // cyan
-  0x8410, // gray
-  0x4208, // dark gray
-  0xFC10, // orange
-  0x07F0, // aqua
-  0x780F, // purple
-  0x03EF, // teal
-  0xF810, // red-ish
-  0xFFFF  // white duplicate
-};
 
 /** Wipe entire screen and replace with contents of the 4-bit color framebuffer. */
 void updateDisplayWithFB() {
@@ -240,9 +377,13 @@ void handleSerialCommand() {
     {
       loadImageFromSD();
     }
-    else if (serialCommand.equals("speed")) 
+    else if (serialCommand.equals("calibrate")) 
     {
-      int argument1;
+      calibrateDisplay(true);
+    }
+    else if (serialCommand.equals("setcolor")) 
+    {
+      int argument1 = NULL;
       Serial.println("Please select fan speed (1-6):");
       while (!argument1) 
       {
@@ -250,6 +391,7 @@ void handleSerialCommand() {
       }
       Serial.print("Selected fan speed: ");
       Serial.println(String(argument1));
+      setDrawColor(argument1);
     } 
     else 
     {
@@ -265,10 +407,13 @@ void setup()
   initDisplay();
   initSD(26);
   // initNetwork(NETWORK_SSID, NETWORK_PASS, LOCAL_HOSTNAME);
+  pinMode(MENU_BUTTON_PIN, INPUT);
 }
 
 void loop()
 {
   handleTouch();
   handleSerialCommand();
+  // We just gotta run this on loop until we can set up interrupts.
+  handleMenuButton();
 }
