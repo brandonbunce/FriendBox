@@ -8,6 +8,7 @@
 
 // Touch
 #define CALIBRATION_FILE "/calibrationData"
+TFT_eSPI_Button colorButton[15];
 
 // Input
 #define MENU_BUTTON_PIN 0
@@ -16,7 +17,6 @@ static unsigned int lastButtonState = 0;
 static bool alreadyPressed = false;
 #define DEBOUNCE_MILLISECONDS 50
 // Invoke the TFT_eSPI button class and create all the button objects
-TFT_eSPI_Button color[15];
 
 // Output
 
@@ -55,7 +55,9 @@ static int currentBackgroundColorIndex = 0;
 static int currentDrawColorIndex = 11;
 static int currentBrushRadius = 5;
 #define DRAW_MENU_TOP_BAR_HEIGHT_PX 50
-#define DRAW_MENU_BOTTOM_BAR_HEIGHT_PX 50
+#define DRAW_MENU_BOTTOM_BAR_HEIGHT_PX 25
+#define DRAW_MENU_BOTTOM_BAR_ITEM_WIDTH_PX 27
+static bool menuBarOpen = false;
 
 // Network
 #define LOCAL_HOSTNAME "friendbox"
@@ -69,6 +71,7 @@ String serialCommand;
 // Functions
 void updateDisplayWithFB();
 void calibrateDisplay(bool force);
+void setDrawColor(uint8_t colorIndex);
 void drawPixelToFB(int x, int y, uint8_t colorIndex);
 void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex);
 void drawingMenu(bool show);
@@ -78,16 +81,49 @@ void handleTouch() {
   static uint16_t color;
 
   if (tft.getTouch(&touchX, &touchY)) {
-    //Serial.print("Touch - X: ");
-    //Serial.print(touchX);
-    //Serial.print(" Y: ");
-    //Serial.println(touchY);
+    Serial.print("Touch - X: ");
+    Serial.print(touchX);
+    Serial.print(" Y: ");
+    Serial.println(touchY);
     //Serial.print(" Z: ");
     //Serial.println(tft.getTouchRawZ());
     
     // Touch coordinates already match screen/framebuffer!
     //drawPixelToFB(touchX, touchY, 2);
-    drawBrushToFB(touchX, touchY, currentBrushRadius, currentDrawColorIndex);
+    if (menuBarOpen) {
+      if ((touchY > DRAW_MENU_TOP_BAR_HEIGHT_PX) &&
+       (touchY < (tft.height() - DRAW_MENU_BOTTOM_BAR_HEIGHT_PX))) {
+          drawBrushToFB(touchX, touchY, currentBrushRadius, currentDrawColorIndex);
+       }
+       else {
+        for (int button = 0; button < 15; button++) {
+          if (colorButton[button].contains(touchX, touchY)) {
+            colorButton[button].press(true);
+          }
+          else {
+            colorButton[button].press(false);
+          }
+        }
+       }
+    }
+    else {
+      drawBrushToFB(touchX, touchY, currentBrushRadius, currentDrawColorIndex);
+    }
+  }
+}
+
+void handleTouchButtonUpdate() {
+  for (uint8_t b = 0; b < 15; b++) {
+
+    if (colorButton[b].justReleased() && menuBarOpen) colorButton[b].drawButton();     // draw normal
+
+    if (colorButton[b].justPressed() && menuBarOpen) {
+      colorButton[b].drawButton(true);  // draw invert
+
+      Serial.print("Touch color");
+      Serial.println(b);
+      setDrawColor(b);
+    }
   }
 }
 
@@ -120,10 +156,19 @@ void handleMenuButton() {
 
 void drawingMenu(bool show) {
   if (show) {
-    tft.fillRect(0, 0, 480, 50, TFT_WHITE);
-    tft.fillRect(0, 270, 480, 50, TFT_WHITE);
+    menuBarOpen = true;
+    //tft.fillRect(0, 0, 480, 50, TFT_WHITE);
+    //tft.fillRect(0, 270, 480, 50, TFT_WHITE);
+    for (int col = 0; col < 16; col++){
+      Serial.print(col);
+      colorButton[col].initButtonUL(&tft, (col*30), (tft.height() - DRAW_MENU_BOTTOM_BAR_HEIGHT_PX), 
+      DRAW_MENU_BOTTOM_BAR_ITEM_WIDTH_PX, DRAW_MENU_BOTTOM_BAR_HEIGHT_PX, 
+      TFT_WHITE, palette[col], palette[1], "", 1);
+      colorButton[col].drawButton();
+    }
   }
   else {
+    menuBarOpen = false;
     updateDisplayWithFB();
   }
 }
@@ -413,6 +458,7 @@ void setup()
 void loop()
 {
   handleTouch();
+  handleTouchButtonUpdate();
   handleSerialCommand();
   // We just gotta run this on loop until we can set up interrupts.
   handleMenuButton();
