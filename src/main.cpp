@@ -19,6 +19,9 @@ static bool alreadyPressed = false;
 // Invoke the TFT_eSPI button class and create all the button objects
 
 // Output
+static unsigned long executionStarted = 0;
+static unsigned long executionEnded = 0;
+static unsigned long executionIterations = 0;
 
 // Display
 TFT_eSPI tft = TFT_eSPI();
@@ -30,6 +33,11 @@ typedef enum {
   TOOL_DITHER,
   TOOL_FILL
 } draw_tool_id_t;
+typedef enum {
+  SCREEN_CANVAS,  
+  SCREEN_WELCOME,
+  SCREEN_NETWORK_SETTINGS
+} screen_id_t;
 /** Defines color palette for our 4-bit color frame buffer.
  * Color palette is from https://androidarts.com/palette/16pal.htm
 */
@@ -80,23 +88,21 @@ void handleTouch() {
   uint16_t touchX, touchY;
   static uint16_t color;
 
-  if (tft.getTouch(&touchX, &touchY)) {
-    Serial.print("Touch - X: ");
-    Serial.print(touchX);
-    Serial.print(" Y: ");
-    Serial.println(touchY);
+    //Serial.print("Touch - X: ");
+    //Serial.print(touchX);
+    //Serial.print(" Y: ");
+    //Serial.println(touchY);
     //Serial.print(" Z: ");
     //Serial.println(tft.getTouchRawZ());
     
     // Touch coordinates already match screen/framebuffer!
     //drawPixelToFB(touchX, touchY, 2);
     if (menuBarOpen) {
-      if ((touchY > DRAW_MENU_TOP_BAR_HEIGHT_PX) &&
-       (touchY < (tft.height() - DRAW_MENU_BOTTOM_BAR_HEIGHT_PX))) {
+      if (tft.getTouch(&touchX, &touchY) && ((touchY > DRAW_MENU_TOP_BAR_HEIGHT_PX) && (touchY < (tft.height() - DRAW_MENU_BOTTOM_BAR_HEIGHT_PX)))) {
           drawBrushToFB(touchX, touchY, currentBrushRadius, currentDrawColorIndex);
        }
        else {
-        for (int button = 0; button < 15; button++) {
+        for (int button = 0; button <= 15; button++) {
           if (colorButton[button].contains(touchX, touchY)) {
             colorButton[button].press(true);
           }
@@ -106,14 +112,13 @@ void handleTouch() {
         }
        }
     }
-    else {
+    else if (tft.getTouch(&touchX, &touchY)) {
       drawBrushToFB(touchX, touchY, currentBrushRadius, currentDrawColorIndex);
     }
-  }
 }
 
 void handleTouchButtonUpdate() {
-  for (uint8_t b = 0; b < 15; b++) {
+  for (uint8_t b = 0; b <= 15; b++) {
 
     if (colorButton[b].justReleased() && menuBarOpen) colorButton[b].drawButton();     // draw normal
 
@@ -159,7 +164,7 @@ void drawingMenu(bool show) {
     menuBarOpen = true;
     //tft.fillRect(0, 0, 480, 50, TFT_WHITE);
     //tft.fillRect(0, 270, 480, 50, TFT_WHITE);
-    for (int col = 0; col < 16; col++){
+    for (int col = 0; col <= 15; col++){
       Serial.print(col);
       colorButton[col].initButtonUL(&tft, (col*30), (tft.height() - DRAW_MENU_BOTTOM_BAR_HEIGHT_PX), 
       DRAW_MENU_BOTTOM_BAR_ITEM_WIDTH_PX, DRAW_MENU_BOTTOM_BAR_HEIGHT_PX, 
@@ -453,13 +458,19 @@ void setup()
   initSD(26);
   // initNetwork(NETWORK_SSID, NETWORK_PASS, LOCAL_HOSTNAME);
   pinMode(MENU_BUTTON_PIN, INPUT);
+  Serial.println(getCpuFrequencyMhz());
 }
 
 void loop()
 {
+  //executionStarted = millis();
   handleTouch();
   handleTouchButtonUpdate();
   handleSerialCommand();
   // We just gotta run this on loop until we can set up interrupts.
   handleMenuButton();
+  //executionEnded = millis();
+  //Serial.println(executionEnded - executionStarted);
+  //executionIterations++;
+  //Serial.println(executionIterations);
 }
