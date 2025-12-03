@@ -34,11 +34,14 @@ uint16_t draw_color_palette[16] = {
 };
 
 // Touch
-#define CALIBRATION_FILE "/calibrationData"
+/** How many "inputs" should we drop after intial touch and liftoff? */
+#define TOUCH_INPUT_BUFFER 10
 /** How many times we have registered a touch input. */
 static uint16_t touch_count = 0;
 /** Touch inputs waiting to be drawn (insane asylum) */
-static uint16_t touch_queue[10];
+static uint16_t touch_queue_x[TOUCH_INPUT_BUFFER];
+static uint16_t touch_queue_y[TOUCH_INPUT_BUFFER];
+static uint8_t touch_queue_lastwrite_position = 0;
 
 // Input
 String serialCommand;
@@ -63,6 +66,8 @@ void initTouch(bool forceCalibrate);
 void initSD(bool forceFormat);
 void initNetwork();
 void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex);
+void handleTouch();
+void handleTouchQueue();
 
 void setup()
 {
@@ -77,22 +82,63 @@ void setup()
 
 void loop()
 {
-  uint16_t touchX, touchY, touchZ;
+  handleTouch();
+}
+
+/** Read from the display, and queue touch points if valid. */
+void handleTouch()
+{
+  uint16_t touchX, touchY;
   if (lcd.getTouch(&touchX, &touchY))
   { // Touching
-    Serial.print("Touch - X: ");
-    Serial.print(touchX);
-    Serial.print(" Y: ");
-    Serial.println(touchY);
-    if (++touch_count >= 10) {
-    drawBrushToFB(touchX, touchY, 5, 3);
+    if (touchX >= 0 && touchX < lcd.width() &&
+        touchY >= 0 && touchY < lcd.height())
+    {
+      // Serial.print("Touch - X: ");
+      // Serial.print(touchX);
+      // Serial.print(" Y: ");
+      // Serial.println(touchY);
+
+      if (++touch_count > TOUCH_INPUT_BUFFER)
+      {
+        if (touch_queue_lastwrite_position < TOUCH_INPUT_BUFFER)
+        {
+          touch_queue_x[touch_queue_lastwrite_position] = touchX;
+          touch_queue_y[touch_queue_lastwrite_position] = touchY;
+          
+          touch_queue_lastwrite_position =
+          (touch_queue_lastwrite_position + 1) % TOUCH_INPUT_BUFFER;
+        }
+        handleTouchQueue(); // Move thru queue retroactively, but only if touching.
+      }
     }
   }
-  else { // Not touching.
+  else
+  { // No longer touching, re-init to zero.
     touch_count = 0;
+    memset(touch_queue_x, 0, sizeof(touch_queue_x));
+    memset(touch_queue_y, 0, sizeof(touch_queue_y));
   }
-  // Serial.println("Running.");
-  // Serial.println(lcd.readPixel(10, 10));
+}
+
+/** Process touch points from queue if valid. */
+void handleTouchQueue()
+{
+  uint8_t touch_queue_read_position = (touch_queue_lastwrite_position + TOUCH_INPUT_BUFFER - (TOUCH_INPUT_BUFFER - 1)) % TOUCH_INPUT_BUFFER;
+
+  //Serial.print("Last Write Pos: ");
+  //Serial.println(touch_queue_lastwrite_position);
+  //Serial.print("Read Pos: ");
+  //Serial.println(touch_queue_read_position);
+  //Serial.print("X Value: ");
+  //Serial.println(touch_queue_x[touch_queue_read_position]);
+
+  if (((touch_queue_x[touch_queue_read_position] + 
+      touch_queue_y[touch_queue_read_position]) > 0)) {
+    drawBrushToFB(touch_queue_x[touch_queue_read_position], 
+      touch_queue_y[touch_queue_read_position], 3, 3);
+    //Serial.println("Drawing.");
+  }
 }
 
 void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex)
@@ -174,17 +220,18 @@ void initTouch(bool forceCalibrate)
   File touch_calibration_file = SD.open("/touch_calibration_file.bin", FILE_READ);
   if (touch_calibration_file)
   { // File present, read and apply.
-    if (touch_calibration_file.readBytes((char *)calibration_data, 16) == 16) 
+    if (touch_calibration_file.readBytes((char *)calibration_data, 16) == 16)
     {
       calibration_data_ok = true;
-    #ifdef FRIENDBOX_DEBUG_MODE
+#ifdef FRIENDBOX_DEBUG_MODE
       Serial.println("INFO: Calibration Data OK!");
-    #endif
+#endif
     }
-    else {
-    #ifdef FRIENDBOX_DEBUG_MODE
+    else
+    {
+#ifdef FRIENDBOX_DEBUG_MODE
       Serial.println("INFO: Calibration Data is incomplete or corrupted! Deleting...");
-    #endif
+#endif
       SD.remove("/touch_calibration_file.bin");
     }
     touch_calibration_file.close();
@@ -192,13 +239,13 @@ void initTouch(bool forceCalibrate)
 
   if (!calibration_data_ok || forceCalibrate)
   { // data not valid. recalibrate
-  #ifdef FRIENDBOX_DEBUG_MODE
+#ifdef FRIENDBOX_DEBUG_MODE
     Serial.println("INFO: Recreating touchscreen calibration because:");
     Serial.print("calibration_data_ok: ");
     Serial.println(calibration_data_ok);
     Serial.print("forceCalibrate: ");
     Serial.println(forceCalibrate);
-  #endif
+#endif
     lcd.fillScreen(TFT_BLACK);
     lcd.setTextColor(TFT_WHITE, TFT_BLACK);
     lcd.setCursor(160, 40);
@@ -209,21 +256,21 @@ void initTouch(bool forceCalibrate)
 
     lcd.calibrateTouch(calibration_data, TFT_WHITE, TFT_RED, 15);
 
-  #ifdef FRIENDBOX_DEBUG_MODE
+#ifdef FRIENDBOX_DEBUG_MODE
     Serial.println("Touch Calibration Data");
     for (int i = 0; i < 8; i++)
     {
       Serial.println(calibration_data[i]);
     }
-  #endif
+#endif
     File touch_calibration_file = SD.open("/touch_calibration_file.bin", FILE_WRITE);
     if (touch_calibration_file)
     {
       touch_calibration_file.write((const unsigned char *)calibration_data, sizeof(calibration_data));
       touch_calibration_file.close();
-    #ifdef FRIENDBOX_DEBUG_MODE
+#ifdef FRIENDBOX_DEBUG_MODE
       Serial.println("INFO: Successfully wrote calibration data to SD.");
-    #endif
+#endif
     }
   }
 
