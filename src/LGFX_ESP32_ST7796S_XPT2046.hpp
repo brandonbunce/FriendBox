@@ -90,8 +90,10 @@ public:
 // SPIバスの設定
       cfg.spi_host = SPI3_HOST;     // 使用するSPIを選択  ESP32-S2,C3 : SPI2_HOST or SPI3_HOST / ESP32 : VSPI_HOST or HSPI_HOST
       // ※ ESP-IDFバージョンアップに伴い、VSPI_HOST , HSPI_HOSTの記述は非推奨になるため、エラーが出る場合は代わりにSPI2_HOST , SPI3_HOSTを使用してください。
-      cfg.spi_mode = 0;             // SPI通信モードを設定 (0 ~ 3)
-      cfg.freq_write = 27000000;    // 送信時のSPIクロック (最大80MHz, 80MHzを整数で割った値に丸められます)
+      cfg.spi_mode = 0  ;             // SPI通信モードを設定 (0 ~ 3)
+      //cfg.freq_write = 27000000;    // 送信時のSPIクロック (最大80MHz, 80MHzを整数で割った値に丸められます)
+      cfg.freq_write = 30000000;    // 送信時のSPIクロック (最大80MHz, 80MHzを整数で割った値に丸められます)
+      //cfg.freq_read  = 20000000;    // 受信時のSPIクロック
       cfg.freq_read  = 20000000;    // 受信時のSPIクロック
       cfg.spi_3wire  = false;        // 受信をMOSIピンで行う場合はtrueを設定
       cfg.use_lock   = true;        // トランザクションロックを使用する場合はtrueを設定
@@ -189,7 +191,7 @@ public:
       cfg.offset_rotation = 3;// 表示とタッチの向きのが一致しない場合の調整 0~7の値で設定
 
 // SPI接続の場合
-      cfg.spi_host = VSPI_HOST;// 使用するSPIを選択 (HSPI_HOST or VSPI_HOST)
+      cfg.spi_host = SPI3_HOST;// 使用するSPIを選択 (HSPI_HOST or VSPI_HOST)
       cfg.freq = 2500000;     // SPIクロックを設定
       cfg.pin_sclk = 18;     // SCLKが接続されているピン番号
       cfg.pin_mosi = 23;     // MOSIが接続されているピン番号
