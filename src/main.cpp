@@ -19,8 +19,8 @@ lv_display_t *lvgl_disp;
 #define TFT_VER_RES 320
 #define LVGL_DRAW_BUF_SIZE (TFT_HOR_RES * TFT_VER_RES / 10 * (LV_COLOR_DEPTH / 8))
 static uint32_t lvgl_buf[LVGL_DRAW_BUF_SIZE / 4] = {0};
+static uint8_t *canvas_buf;
 #define TFT_ROTATION LV_DISPLAY_ROTATION_270
-#define LV_FONT_DECLARE(LV_FONT_MONTSERRAT_30)
 static lv_obj_t *scr_welcome;
 static lv_obj_t *scr_systemsettings;
 static lv_obj_t *scr_networksettings;
@@ -54,6 +54,7 @@ uint16_t draw_color_palette[16] = {
 };
 
 // Touch
+uint16_t touchX, touchY, touchZ; // Z:0 = no touch, Z>0 = touching
 /** How many "inputs" should we drop after intial touch and liftoff? */
 #define TOUCH_INPUT_BUFFER 10
 /** How many times we have registered a touch input. */
@@ -88,6 +89,7 @@ void initNetwork();
 void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex);
 void handleTouch();
 static void event_handler_scr_dev_go_canvas(lv_event_t *e);
+
 static uint32_t systemTick(void);
 
 void setup()
@@ -139,7 +141,7 @@ void lv_create_dev_menu()
   lv_obj_align(btn2, LV_ALIGN_CENTER, 0, 30);
   lv_obj_remove_flag(btn2, LV_OBJ_FLAG_PRESS_LOCK);
   btn_label = lv_label_create(btn2);
-  lv_label_set_text(btn_label, "Button Does Nothing");
+  lv_label_set_text(btn_label, "Useless Button");
   lv_obj_center(btn_label);
   lv_obj_set_size(btn2, 300, 70);
 
@@ -153,6 +155,63 @@ void lv_create_dev_menu()
   currentScreen = SCREEN_WELCOME;
 }
 
+void lv_create_canvas_scr()
+{
+  scr_canvas = lv_obj_create(NULL);
+  lv_scr_load(scr_canvas);
+  lv_obj_set_style_bg_color(lv_screen_active(), lv_palette_main(LV_PALETTE_BLUE), LV_PART_MAIN);
+
+  // Create buffer
+  canvas_buf = (uint8_t *)malloc((TFT_HOR_RES * TFT_VER_RES) / 2); // 76.8 KB, divide by two for 4-bit color.
+  if (!canvas_buf)
+  {
+    Serial.println("FATAL: Framebuffer allocation failed!");
+    while (1)
+      ;
+  }
+  memset(canvas_buf, 0, (TFT_HOR_RES * TFT_VER_RES) / 2);
+
+  // Create canvas and assign buffer.
+  lv_obj_t *canvas = lv_canvas_create(lv_screen_active());
+  lv_canvas_set_buffer(canvas, canvas_buf, TFT_HOR_RES, TFT_VER_RES, LV_COLOR_FORMAT_I4);
+
+  // Build palette.
+  for (int i = 0; i < 15; i++)
+  {
+    lv_canvas_set_palette(canvas, i, lv_color_to_32(lv_color_hex(draw_color_palette[i]), 255));
+  }
+
+  lv_canvas_fill_bg(canvas, lv_color_make(0, 0, 255), LV_OPA_COVER);
+  lv_obj_center(canvas);
+
+  lv_canvas_set_px(canvas, 50, 52, lv_color_make(0, 0, 5), LV_OPA_COVER);
+  lv_canvas_set_px(canvas, 51, 50, lv_color_make(0, 0, 5), LV_OPA_COVER);
+  lv_canvas_set_px(canvas, 52, 50, lv_color_make(0, 0, 5), LV_OPA_COVER);
+
+  // Instantiate btl label object
+  lv_obj_t *btn_label;
+  // Create a Button (btn1)
+  lv_obj_t *btn1 = lv_button_create(lv_screen_active());
+  // lv_obj_add_event_cb(btn1, event_handler_scr_dev_go_canvas, LV_EVENT_ALL, NULL);
+  lv_obj_align(btn1, LV_ALIGN_CENTER, 0, -50);
+  lv_obj_remove_flag(btn1, LV_OBJ_FLAG_PRESS_LOCK);
+  btn_label = lv_label_create(btn1);
+  lv_label_set_text(btn_label, "Save");
+  lv_obj_center(btn_label);
+  lv_obj_set_size(btn1, 70, 70);
+
+  lv_draw_rect_dsc_t dsc;
+  lv_draw_rect_dsc_init(&dsc);
+  dsc.bg_color = lv_color_hex(draw_color_palette[5]);
+
+  lv_area_t coords = {10, 10, 40, 30};
+
+  lv_draw_fill_dsc_t fill_dsc;
+  lv_draw_fill_dsc_init(&fill_dsc);
+  fill_dsc.color = lv_color_hex(draw_color_palette[5]);
+  fill_dsc.opa = LV_OPA_COVER;
+}
+
 #pragma endregion
 
 #pragma region Event Handlers
@@ -160,50 +219,53 @@ void lv_create_dev_menu()
 /** Read from the display, and queue touch points if valid. */
 void handleTouch()
 {
-  uint16_t touchX, touchY;
-  if (lcd.getTouch(&touchX, &touchY) && (currentScreen == SCREEN_CANVAS))
-  { // Touching
-    if (touchX >= 0 && touchX < TFT_HOR_RES &&
-        touchY >= 0 && touchY < TFT_VER_RES)
+  static uint16_t localTouchX, localTouchY;
+  delay(3); // Introducing delay for some reason eliminates crap lines on the screen?? This is an SPI bus issue.
+  if (lcd.getTouch(&localTouchX, &localTouchY) && (localTouchX >= 0 && localTouchX < TFT_HOR_RES &&
+                                                   localTouchY >= 0 && localTouchY < TFT_VER_RES))
+  { // Touching in bounds
+    // Serial.print("Touch - X: ");
+    // Serial.print(touchX);
+    // Serial.print(" Y: ");
+    // Serial.println(touchY);
+
+    // Drop inputs until we reach TOUCH_INPUT_BUFFER
+    if (++touch_count > TOUCH_INPUT_BUFFER)
     {
-      // Serial.print("Touch - X: ");
-      // Serial.print(touchX);
-      // Serial.print(" Y: ");
-      // Serial.println(touchY);
-
-      if (++touch_count > TOUCH_INPUT_BUFFER)
+      if (touch_queue_lastwrite_position < TOUCH_INPUT_BUFFER)
       {
-        if (touch_queue_lastwrite_position < TOUCH_INPUT_BUFFER)
-        {
-          touch_queue_x[touch_queue_lastwrite_position] = touchX;
-          touch_queue_y[touch_queue_lastwrite_position] = touchY;
+        touch_queue_x[touch_queue_lastwrite_position] = localTouchX;
+        touch_queue_y[touch_queue_lastwrite_position] = localTouchY;
 
-          touch_queue_lastwrite_position =
-              (touch_queue_lastwrite_position + 1) % TOUCH_INPUT_BUFFER;
-        }
-        // Draw points in queue if valid.
-        uint8_t touch_queue_read_position = (touch_queue_lastwrite_position + TOUCH_INPUT_BUFFER - (TOUCH_INPUT_BUFFER - 1)) % TOUCH_INPUT_BUFFER;
+        touch_queue_lastwrite_position =
+            (touch_queue_lastwrite_position + 1) % TOUCH_INPUT_BUFFER;
+      }
+      // Draw points in queue if valid.
+      uint8_t touch_queue_read_position = (touch_queue_lastwrite_position + TOUCH_INPUT_BUFFER - (TOUCH_INPUT_BUFFER - 1)) % TOUCH_INPUT_BUFFER;
 
-        // Serial.print("Last Write Pos: ");
-        // Serial.println(touch_queue_lastwrite_position);
-        // Serial.print("Read Pos: ");
-        // Serial.println(touch_queue_read_position);
-        // Serial.print("X Value: ");
-        // Serial.println(touch_queue_x[touch_queue_read_position]);
+      // Serial.print("Last Write Pos: ");
+      // Serial.println(touch_queue_lastwrite_position);
+      // Serial.print("Read Pos: ");
+      // Serial.println(touch_queue_read_position);
+      // Serial.print("X Value: ");
+      // Serial.println(touch_queue_x[touch_queue_read_position]);
 
-        if (((touch_queue_x[touch_queue_read_position] +
-              touch_queue_y[touch_queue_read_position]) > 0))
-        {
-          drawBrushToFB(touch_queue_x[touch_queue_read_position], touch_queue_y[touch_queue_read_position], 3, 3);
-          /** Translate to idiotic LVGL coordinates (I'm sure it makes perfect sense but i hate translations) */
-          // Serial.println("Drawing.");
-        }
+      if (((touch_queue_x[touch_queue_read_position] +
+            touch_queue_y[touch_queue_read_position]) > 0))
+      {
+        drawBrushToFB(touch_queue_x[touch_queue_read_position], touch_queue_y[touch_queue_read_position], 3, 3);
+        touchX = touch_queue_x[touch_queue_read_position];
+        touchY = touch_queue_y[touch_queue_read_position];
+        touchZ = 1;
+        /** Translate to idiotic LVGL coordinates (I'm sure it makes perfect sense but i hate translations) */
+        // Serial.println("Drawing.");
       }
     }
   }
   else
   { // No longer touching, re-init to zero.
     touch_count = 0;
+    touchZ = 0;
     memset(touch_queue_x, 0, sizeof(touch_queue_x));
     memset(touch_queue_y, 0, sizeof(touch_queue_y));
   }
@@ -211,18 +273,16 @@ void handleTouch()
 
 void handleTouch_lvgl(lv_indev_t *indev, lv_indev_data_t *data)
 {
-  uint16_t touchX, touchY;
-  
-      if (lcd.getTouch(&touchX, &touchY))
-      { // Touching
-        data->point.x = touchX;
-        data->point.y = touchY;
-        data->state = LV_INDEV_STATE_PRESSED;
-      }
-      else
-      {
-        data->state = LV_INDEV_STATE_RELEASED;
-      }
+  if (touchZ)
+  { // Touching
+    data->point.x = touchX;
+    data->point.y = touchY;
+    data->state = LV_INDEV_STATE_PRESSED;
+  }
+  else
+  {
+    data->state = LV_INDEV_STATE_RELEASED;
+  }
 }
 
 // Callback that is triggered when btn1 is clicked
@@ -233,7 +293,7 @@ static void event_handler_scr_dev_go_canvas(lv_event_t *e)
   {
     currentScreen = SCREEN_CANVAS;
     lv_obj_clean(scr_welcome);
-    lcd.fillScreen(TFT_BLACK);
+    lv_create_canvas_scr();
   }
 }
 
@@ -298,7 +358,7 @@ void initDisplay()
   lcd.setRotation(3); // This option enables suffering. Don't forget to account for coordinate translation!
   lcd.setBrightness(255);
   lcd.setColorDepth(16);
-  lcd.fillScreen(TFT_WHITE);
+  lcd.fillScreen(TFT_RED);
   /*lcd.fillScreen(TFT_DARKCYAN);
   lcd.setTextColor(TFT_GOLD, TFT_DARKCYAN);
   lcd.setTextSize(4);
