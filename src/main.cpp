@@ -1,31 +1,52 @@
 #include "FS.h"
 #include <Arduino.h>
 #include <WiFi.h>
-#include <TFT_eSPI.h>
+#include <LovyanGFX.h>
+#include <LGFX_ESP32_ST7796S_XPT2046.hpp>
 #include <SPI.h>
 #include <SD.h>
 #include "secrets.h"
 
+// (C) 2025-2026 Brandon Bunce - FriendBox System Software
+#define FRIENDBOX_DEBUG_MODE true
+#define FRIENDBOX_SOFTWARE_VERSION "Software v0.1 (NO-LVGL)"
+
 // Touch
-#define CALIBRATION_FILE "/calibrationData"
-TFT_eSPI_Button colorButton[15];
+uint16_t touchX, touchY, touchZ; // Z:0 = no touch, Z>0 = touching
+/** How many "inputs" should we drop after intial touch and liftoff? */
+#define TOUCH_INPUT_BUFFER 10
+/** How many times we have registered a touch input. */
+static uint16_t touch_count = 0;
+/** Touch inputs waiting to be drawn (insane asylum) */
+static uint16_t touch_queue_x[TOUCH_INPUT_BUFFER] = {0}, touch_queue_y[TOUCH_INPUT_BUFFER]  = {0};
+/** Last written value(s) in the touch queue. */
+static uint8_t touch_queue_lastwrite_position = 0;
+/** These buttons select the current active color. */
+LGFX_Button colorButton[15];
 
-// Input
+// Input (Buttons)
+/** Which GPIO pin will be used as input for the menu button? */
 #define MENU_BUTTON_PIN 0
+/** Debouncing nonsense. */
 static unsigned long lastPress = 0;
+/** Debouncing nonsense. */
 static unsigned int lastButtonState = 0;
+/** Debouncing nonsense. */
 static bool alreadyPressed = false;
+/** How long should button be pressed before logically registering input? */
 #define DEBOUNCE_MILLISECONDS 50
-// Invoke the TFT_eSPI button class and create all the button objects
+/** Variable for incoming serial command. */
+String serialCommand;
 
-// Output
-static unsigned long executionStarted = 0;
-static unsigned long executionEnded = 0;
-static unsigned long executionIterations = 0;
+// Output (LED)
 
 // Display
-TFT_eSPI tft = TFT_eSPI();
-uint8_t* fb4;
+/** Reference to display object. */
+static LGFX tft;
+#define TFT_HOR_RES 480
+#define TFT_VER_RES 320
+uint8_t* canvas_framebuffer;
+/** Defines tools that we can use on the canvas. */
 typedef enum {
   TOOL_ERASER,  
   TOOL_BRUSH,
@@ -33,6 +54,7 @@ typedef enum {
   TOOL_DITHER,
   TOOL_FILL
 } draw_tool_id_t;
+/** Defines the menus we can be in. */
 typedef enum {
   SCREEN_CANVAS,  
   SCREEN_WELCOME,
@@ -41,7 +63,9 @@ typedef enum {
 /** Defines color palette for our 4-bit color frame buffer.
  * Color palette is from https://androidarts.com/palette/16pal.htm
 */
-uint16_t palette[16] = {
+
+static screen_id_t active_screen;
+uint16_t draw_color_palette[16] = {
   0x0000, // Black (0)
   0x9CF3, // Gray (1)
   0xFFFF, // White (2)
@@ -59,64 +83,89 @@ uint16_t palette[16] = {
   0x351d, // Sky Blue (14)
   0xb6dd  // Cloud Blue (15)
 };
+
+// Canvas
+static bool menuBarOpen = false;
 static int currentBackgroundColorIndex = 0;
 static int currentDrawColorIndex = 11;
 static int currentBrushRadius = 5;
 #define DRAW_MENU_TOP_BAR_HEIGHT_PX 50
 #define DRAW_MENU_BOTTOM_BAR_HEIGHT_PX 25
 #define DRAW_MENU_BOTTOM_BAR_ITEM_WIDTH_PX 27
-static bool menuBarOpen = false;
 
 // Network
 #define LOCAL_HOSTNAME "friendbox"
 
 // Storage
-#define TEST_FILE_SIZE (4 * 1024 * 1024)
-File displayFile;
 SPIClass sdspi = SPIClass(HSPI);
-String serialCommand;
+#define SD_CS 26
+#define SD_SCK 14
+#define SD_MISO 32
+#define SD_MOSI 13
 
 // Functions
 void updateDisplayWithFB();
-void calibrateDisplay(bool force);
 void setDrawColor(uint8_t colorIndex);
 void drawPixelToFB(int x, int y, uint8_t colorIndex);
 void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex);
 void drawingMenu(bool show);
 
-void handleTouch() {
-  uint16_t touchX, touchY;
-  static uint16_t color;
+/** Read from the display, and queue touch points if valid. */
+void handleTouch()
+{
+  static uint16_t localTouchX, localTouchY;
+  //delay(3); // Introducing delay for some reason eliminates crap lines on the screen?? This is an SPI bus issue.
+  if (tft.getTouch(&localTouchX, &localTouchY) && (localTouchX >= 0 && localTouchX < TFT_HOR_RES &&
+                                                   localTouchY >= 0 && localTouchY < TFT_VER_RES))
+  { // Touching in bounds
+    // Serial.print("Touch - X: ");
+    // Serial.print(touchX);
+    // Serial.print(" Y: ");
+    // Serial.println(touchY);
 
-    //Serial.print("Touch - X: ");
-    //Serial.print(touchX);
-    //Serial.print(" Y: ");
-    //Serial.println(touchY);
-    //Serial.print(" Z: ");
-    //Serial.println(tft.getTouchRawZ());
-    
-    // Touch coordinates already match screen/framebuffer!
-    //drawPixelToFB(touchX, touchY, 2);
-    if (menuBarOpen) {
-      if (tft.getTouch(&touchX, &touchY) && ((touchY > DRAW_MENU_TOP_BAR_HEIGHT_PX) && (touchY < (tft.height() - DRAW_MENU_BOTTOM_BAR_HEIGHT_PX)))) {
-          drawBrushToFB(touchX, touchY, currentBrushRadius, currentDrawColorIndex);
-       }
-       else {
-        for (int button = 0; button <= 15; button++) {
-          if (colorButton[button].contains(touchX, touchY)) {
-            colorButton[button].press(true);
-          }
-          else {
-            colorButton[button].press(false);
-          }
-        }
-       }
+    // Drop inputs until we reach TOUCH_INPUT_BUFFER
+    if (++touch_count > TOUCH_INPUT_BUFFER)
+    {
+      if (touch_queue_lastwrite_position < TOUCH_INPUT_BUFFER)
+      {
+        touch_queue_x[touch_queue_lastwrite_position] = localTouchX;
+        touch_queue_y[touch_queue_lastwrite_position] = localTouchY;
+
+        touch_queue_lastwrite_position =
+            (touch_queue_lastwrite_position + 1) % TOUCH_INPUT_BUFFER;
+      }
+      // Draw points in queue if valid.
+      uint8_t touch_queue_read_position = (touch_queue_lastwrite_position + TOUCH_INPUT_BUFFER - (TOUCH_INPUT_BUFFER - 1)) % TOUCH_INPUT_BUFFER;
+
+      // Serial.print("Last Write Pos: ");
+      // Serial.println(touch_queue_lastwrite_position);
+      // Serial.print("Read Pos: ");
+      // Serial.println(touch_queue_read_position);
+      // Serial.print("X Value: ");
+      // Serial.println(touch_queue_x[touch_queue_read_position]);
+
+      if (((touch_queue_x[touch_queue_read_position] +
+            touch_queue_y[touch_queue_read_position]) > 0))
+      {
+        drawBrushToFB(touch_queue_x[touch_queue_read_position], touch_queue_y[touch_queue_read_position], 3, 3);
+        touchX = touch_queue_x[touch_queue_read_position];
+        touchY = touch_queue_y[touch_queue_read_position];
+        touchZ = 1;
+        /** Translate to idiotic LVGL coordinates (I'm sure it makes perfect sense but i hate translations) */
+        // Serial.println("Drawing.");
+      }
     }
-    else if (tft.getTouch(&touchX, &touchY)) {
-      drawBrushToFB(touchX, touchY, currentBrushRadius, currentDrawColorIndex);
-    }
+  }
+  else
+  { // No longer touching, re-init to zero.
+    touch_count = 0;
+    touchZ = 0;
+    memset(touch_queue_x, 0, sizeof(touch_queue_x));
+    memset(touch_queue_y, 0, sizeof(touch_queue_y));
+  }
 }
 
+/** Handle button logic based on what screen we are on. */
 void handleTouchButtonUpdate() {
   for (uint8_t b = 0; b <= 15; b++) {
 
@@ -168,7 +217,7 @@ void drawingMenu(bool show) {
       Serial.print(col);
       colorButton[col].initButtonUL(&tft, (col*30), (tft.height() - DRAW_MENU_BOTTOM_BAR_HEIGHT_PX), 
       DRAW_MENU_BOTTOM_BAR_ITEM_WIDTH_PX, DRAW_MENU_BOTTOM_BAR_HEIGHT_PX, 
-      TFT_WHITE, palette[col], palette[1], "", 1);
+      TFT_WHITE, (int)draw_color_palette[col], TFT_WHITE, "", 1, 1);
       colorButton[col].drawButton();
     }
   }
@@ -197,101 +246,121 @@ void initNetwork(const char *netSSID, const char *netPassword, const char *hostn
   // What if the network cannot ever connect? How do we handle?
 }
 
-void initSD(int pin)
+void initSD(bool forceFormat)
 {
+#ifdef FRIENDBOX_DEBUG_MODE
+  Serial.println("INFO: Initializing SD...");
+#endif
+  sdspi.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
 
-  sdspi.begin(14 /* SCK */, 32 /* MISO */, 13 /* MOSI */, 26 /* SS */);
-
-  if (!SD.begin(pin, sdspi))
+  if (!SD.begin(SD_CS, sdspi))
   {
-    Serial.println("ERROR: Card mount failed!");
+#ifdef FRIENDBOX_DEBUG_MODE
+    Serial.println("ERROR: SD mount failed! Is it connected properly?");
+#endif
+    // Todo - Show on-screen error.
     return;
   }
   else
   {
-    Serial.println("INFO: SD card is ready.");
+#ifdef FRIENDBOX_DEBUG_MODE
+    Serial.println("INFO: SD ready!");
+#endif
   }
 }
+
 
 void initDisplay()
 {
-  // Initialize display
-  Serial.println("Initializing TFT_eSPI...");
+#ifdef FRIENDBOX_DEBUG_MODE
+  Serial.println("INFO: Initializing LGFX...");
+#endif
   tft.init();
-  tft.fillScreen(TFT_BLACK);
-  tft.setRotation(3);
-
-  // Console
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setCursor(0, 20, 2);
-  tft.setTextSize(2);
-  tft.println("Welcome to FriendBox.");
-  tft.println("Please wait...");
-
-  // Calibrate Touch
-  calibrateDisplay(false);
+  tft.setRotation(3); // This option enables suffering. Don't forget to account for coordinate translation!
+  tft.setBrightness(255);
+  tft.setColorDepth(16);
+  tft.fillScreen(TFT_DARKCYAN);
+  tft.setTextColor(TFT_GOLD, TFT_DARKCYAN);
+  tft.setTextSize(4);
+  tft.drawCenterString("FriendBox", 240, 120);
+  tft.setTextSize(3);
+  tft.drawCenterString(FRIENDBOX_SOFTWARE_VERSION, 240, 160);
   
   // Allocate framebuffer in ROTATED dimensions
-  fb4 = (uint8_t*) malloc((tft.width() * tft.height()) / 2); // 76.8 KB
-  if (!fb4) {
+  canvas_framebuffer = (uint8_t*) malloc((tft.width() * tft.height()) / 2); // 76.8 KB
+  if (!canvas_framebuffer) {
     Serial.println("FATAL: Framebuffer allocation failed!");
     while(1);
   }
-  memset(fb4, 0, (tft.width() * tft.height()) / 2);
+  memset(canvas_framebuffer, 0, (tft.width() * tft.height()) / 2);
 }
 
-void calibrateDisplay(bool force) {
-  // Initialize touch
-  uint16_t calibrationData[5];
-  uint8_t calDataOK = 0;
-  // check file system
-  // Format regardless.
-  // SPIFFS.format();
-  if (!SPIFFS.begin())
-  {
-    Serial.println("INFO: No SPIFFS exists. Formatting file system...");
-    SPIFFS.format();
-    SPIFFS.begin();
+void initTouch(bool forceCalibrate)
+{
+#ifdef FRIENDBOX_DEBUG_MODE
+  Serial.println("INFO: Initializing LGFX touch...");
+#endif
+  uint16_t calibration_data[8];
+  bool calibration_data_ok = false;
+
+  File touch_calibration_file = SD.open("/touch_calibration_file.bin", FILE_READ);
+  if (touch_calibration_file)
+  { // File present, read and apply.
+    if (touch_calibration_file.readBytes((char *)calibration_data, 16) == 16)
+    {
+      calibration_data_ok = true;
+#ifdef FRIENDBOX_DEBUG_MODE
+      Serial.println("INFO: Calibration Data OK!");
+#endif
+    }
+    else
+    {
+#ifdef FRIENDBOX_DEBUG_MODE
+      Serial.println("INFO: Calibration Data is incomplete or corrupted! Deleting...");
+#endif
+      SD.remove("/touch_calibration_file.bin");
+    }
+    touch_calibration_file.close();
   }
 
-  // check if calibration file exists
-  if (SPIFFS.exists(CALIBRATION_FILE))
-  {
-    File f = SPIFFS.open(CALIBRATION_FILE, "r");
-    if (f)
-    {
-      if (f.readBytes((char *)calibrationData, 14) == 14)
-        calDataOK = 1;
-      f.close();
-    }
-  }
-  if (calDataOK && !force)
-  {
-    // calibration data valid
-    tft.setTouch(calibrationData);
-    Serial.println("Touch calibration data valid. Proceeding.");
-  }
-  else
-  {
-    // data not valid. recalibrate
+  if (!calibration_data_ok || forceCalibrate)
+  { // data not valid. recalibrate
+#ifdef FRIENDBOX_DEBUG_MODE
+    Serial.println("INFO: Recreating touchscreen calibration because:");
+    Serial.print("calibration_data_ok: ");
+    Serial.println(calibration_data_ok);
+    Serial.print("forceCalibrate: ");
+    Serial.println(forceCalibrate);
+#endif
     tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.setCursor(160, 40);
+    tft.setTextSize(4);
+    tft.drawCenterString("Touch Calibration", 240, 70);
     tft.setTextSize(3);
-    tft.drawCentreString("Touch Calibration", 240, 70, 2);
-    tft.setTextSize(2);
-    tft.drawCentreString("Press Highlighted Corners...", 240, 120, 2);
+    tft.drawCenterString("Press Highlighted Corners...", 240, 120);
 
-    tft.calibrateTouch(calibrationData, TFT_WHITE, TFT_RED, 15);
-    // store data
-    File f = SPIFFS.open(CALIBRATION_FILE, "w");
-    if (f)
+    tft.calibrateTouch(calibration_data, TFT_WHITE, TFT_RED, 15);
+
+#ifdef FRIENDBOX_DEBUG_MODE
+    Serial.println("Touch Calibration Data");
+    for (int i = 0; i < 8; i++)
     {
-      f.write((const unsigned char *)calibrationData, 14);
-      f.close();
+      Serial.println(calibration_data[i]);
     }
-    tft.fillScreen(TFT_BLACK);
-    Serial.println("Touch recalibration successful.");
+#endif
+    File touch_calibration_file = SD.open("/touch_calibration_file.bin", FILE_WRITE);
+    if (touch_calibration_file)
+    {
+      touch_calibration_file.write((const unsigned char *)calibration_data, sizeof(calibration_data));
+      touch_calibration_file.close();
+#ifdef FRIENDBOX_DEBUG_MODE
+      Serial.println("INFO: Successfully wrote calibration data to SD.");
+#endif
+    }
   }
+
+  tft.setTouchCalibrate(calibration_data);
 }
 
 void drawPixelToFB(int x, int y, uint8_t colorIndex)
@@ -302,9 +371,9 @@ void drawPixelToFB(int x, int y, uint8_t colorIndex)
     int byteIndex = index >> 1;
 
     if (index & 1)
-        fb4[byteIndex] = (fb4[byteIndex] & 0xF0) | (colorIndex & 0x0F);
+        canvas_framebuffer[byteIndex] = (canvas_framebuffer[byteIndex] & 0xF0) | (colorIndex & 0x0F);
     else
-        fb4[byteIndex] = (fb4[byteIndex] & 0x0F) | ((colorIndex & 0x0F) << 4);
+        canvas_framebuffer[byteIndex] = (canvas_framebuffer[byteIndex] & 0x0F) | ((colorIndex & 0x0F) << 4);
 }
 
 // Helper functions to change tool settings
@@ -321,7 +390,7 @@ void setBackgroundColor(uint8_t colorIndex) {
     Serial.print("Background color set to: ");
     Serial.println(colorIndex);
     currentBackgroundColorIndex = colorIndex;
-    tft.fillScreen(palette[colorIndex]);
+    tft.fillScreen(draw_color_palette[colorIndex]);
   }
 }
 
@@ -332,8 +401,7 @@ void setBrushRadius(int radius) {
   }
 }
 
-// Draw a circle brush at x,y with given radius and color
-// Updates BOTH framebuffer and screen in real-time!
+/** Draw a circle brush at x,y with given radius and color - Updates BOTH framebuffer and screen in real-time! */
 void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex) {
   // Draw filled circle using midpoint circle algorithm
   for (int dy = -radius; dy <= radius; dy++) {
@@ -348,7 +416,7 @@ void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex) {
         
         // Draw to screen immediately for instant feedback
         if (px >= 0 && px < tft.width() && py >= 0 && py < tft.height()) {
-          tft.drawPixel(px, py, palette[colorIndex]);
+          tft.drawPixel(px, py, draw_color_palette[colorIndex]);
         }
       }
     }
@@ -379,7 +447,7 @@ void drawTest4() {
 void saveImageToSD() {
   File f = SD.open("/fb4.bin", FILE_WRITE);
   if (f) {
-    f.write(fb4, (tft.width() * tft.height()) / 2);
+    f.write(canvas_framebuffer, (tft.width() * tft.height()) / 2);
     f.close();
     Serial.println("Image saved!");
   }
@@ -388,7 +456,7 @@ void saveImageToSD() {
 void loadImageFromSD() {
   File f = SD.open("/fb4.bin", FILE_READ);
   if (f) {
-    f.read(fb4, (tft.width() * tft.height()) / 2);
+    f.read(canvas_framebuffer, (tft.width() * tft.height()) / 2);
     f.close();
     updateDisplayWithFB();
     Serial.println("Image loaded!");
@@ -401,9 +469,9 @@ void updateDisplayWithFB() {
   tft.setAddrWindow(0, 0, tft.width(), tft.height());
 
   for (int i = 0; i < (tft.width() * tft.height()) / 2; i++) {
-    uint8_t b = fb4[i];
-    tft.pushColor(palette[b >> 4]);
-    tft.pushColor(palette[b & 0x0F]);
+    uint8_t b = canvas_framebuffer[i];
+    tft.pushColor(draw_color_palette[b >> 4]);
+    tft.pushColor(draw_color_palette[b & 0x0F]);
   }
 
   tft.endWrite();
@@ -426,10 +494,6 @@ void handleSerialCommand() {
     else if (serialCommand.equals("load")) 
     {
       loadImageFromSD();
-    }
-    else if (serialCommand.equals("calibrate")) 
-    {
-      calibrateDisplay(true);
     }
     else if (serialCommand.equals("setcolor")) 
     {
@@ -455,22 +519,17 @@ void setup()
   // cawkins was here
   Serial.begin(115200);
   initDisplay();
-  initSD(26);
+  initSD(false);
+  initTouch(false);
   // initNetwork(NETWORK_SSID, NETWORK_PASS, LOCAL_HOSTNAME);
   pinMode(MENU_BUTTON_PIN, INPUT);
-  Serial.println(getCpuFrequencyMhz());
 }
 
 void loop()
 {
-  //executionStarted = millis();
   handleTouch();
   handleTouchButtonUpdate();
   handleSerialCommand();
   // We just gotta run this on loop until we can set up interrupts.
   handleMenuButton();
-  //executionEnded = millis();
-  //Serial.println(executionEnded - executionStarted);
-  //executionIterations++;
-  //Serial.println(executionIterations);
 }
