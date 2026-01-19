@@ -187,15 +187,15 @@ public:
       cfg.y_min      = 0;    // タッチスクリーンから得られる最小のY値(生の値)
       cfg.y_max      = 479;  // タッチスクリーンから得られる最大のY値(生の値)
       cfg.pin_int    = -1;   // INTが接続されているピン番号
-      cfg.bus_shared = true; // 画面と共通のバスを使用している場合 trueを設定
+      cfg.bus_shared = false; // 画面と共通のバスを使用している場合 trueを設定
       cfg.offset_rotation = 3;// 表示とタッチの向きのが一致しない場合の調整 0~7の値で設定
 
 // SPI接続の場合
-      cfg.spi_host = SPI3_HOST;// 使用するSPIを選択 (HSPI_HOST or VSPI_HOST)
+      cfg.spi_host = SPI2_HOST ;// 使用するSPIを選択 (HSPI_HOST or VSPI_HOST)
       cfg.freq = 2500000;     // SPIクロックを設定
-      cfg.pin_sclk = 18;     // SCLKが接続されているピン番号
-      cfg.pin_mosi = 23;     // MOSIが接続されているピン番号
-      cfg.pin_miso = 19;     // MISOが接続されているピン番号
+      cfg.pin_sclk = 14;     // SCLKが接続されているピン番号
+      cfg.pin_mosi = 13;     // MOSIが接続されているピン番号
+      cfg.pin_miso = 32;     // MISOが接続されているピン番号
       cfg.pin_cs   = 21;     //   CSが接続されているピン番号
 
 // I2C接続の場合
