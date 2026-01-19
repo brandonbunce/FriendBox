@@ -18,21 +18,19 @@ uint16_t touchX, touchY, touchZ; // Z:0 = no touch, Z>0 = touching
 /** How many times we have registered a touch input. */
 static uint16_t touch_count = 0;
 /** Touch inputs waiting to be drawn (insane asylum) */
-static uint16_t touch_queue_x[TOUCH_INPUT_BUFFER] = {0}, touch_queue_y[TOUCH_INPUT_BUFFER]  = {0};
+static uint16_t touch_queue_x[TOUCH_INPUT_BUFFER] = {0}, touch_queue_y[TOUCH_INPUT_BUFFER] = {0};
 /** Last written value(s) in the touch queue. */
 static uint8_t touch_queue_lastwrite_position = 0;
 /** These buttons select the current active color. */
-LGFX_Button colorButton[15];
+LGFX_Button colorButton[16];
+LGFX_Button menuButton[4];
+static char *toolButtonLabel[4] = {"Tools", "Bens", "Save", "Load"};
+LGFX_Button toolButton[5];
+LGFX_Button actionButton[4];
 
 // Input (Buttons)
 /** Which GPIO pin will be used as input for the menu button? */
 #define MENU_BUTTON_PIN 0
-/** Debouncing nonsense. */
-static unsigned long lastPress = 0;
-/** Debouncing nonsense. */
-static unsigned int lastButtonState = 0;
-/** Debouncing nonsense. */
-static bool alreadyPressed = false;
 /** How long should button be pressed before logically registering input? */
 #define DEBOUNCE_MILLISECONDS 50
 /** Variable for incoming serial command. */
@@ -45,47 +43,58 @@ String serialCommand;
 static LGFX tft;
 #define TFT_HOR_RES 480
 #define TFT_VER_RES 320
-uint8_t* canvas_framebuffer;
+uint8_t *canvas_framebuffer;
 /** Defines tools that we can use on the canvas. */
-typedef enum {
-  TOOL_ERASER,  
+typedef enum
+{
+  TOOL_ERASER,
   TOOL_BRUSH,
   TOOL_PENCIL,
   TOOL_DITHER,
   TOOL_FILL
 } draw_tool_id_t;
 /** Defines the menus we can be in. */
-typedef enum {
-  SCREEN_CANVAS,  
+typedef enum
+{
+  SCREEN_CANVAS,
+  SCREEN_CANVAS_MENU,
   SCREEN_WELCOME,
   SCREEN_NETWORK_SETTINGS
 } screen_id_t;
+/** Defines what dropdown (if any) is visible in SCREEN_CANVAS_MENU */
+typedef enum
+{
+  DROPDOWN_NONE,
+  DROPDOWN_TOOLS,
+  DROPDOWN_DISK,
+  DROPDOWN_SHARE
+} canvas_dropdown_id_t;
+static screen_id_t active_screen;
+static canvas_dropdown_id_t active_dropdown;
+
 /** Defines color palette for our 4-bit color frame buffer.
  * Color palette is from https://androidarts.com/palette/16pal.htm
-*/
-
-static screen_id_t active_screen;
+ */
 uint16_t draw_color_palette[16] = {
-  0x0000, // Black (0)
-  0x9CF3, // Gray (1)
-  0xFFFF, // White (2)
-  0xb926, // Red (3)
-  0xdb71, // Meat (4)
-  0x49e5, // Dark Brown (5)
-  0xa324, // Brown (6)
-  0xec46, // Orange (7)
-  0xf70d, // Yellow (8)
-  0x3249, // Dark Green (9)
-  0x4443, // Green (10)
-  0xa665, // Slime Green (11)
-  0x1926, // Night Blue (12)
-  0x02b0, // Sea Blue (13)
-  0x351d, // Sky Blue (14)
-  0xb6dd  // Cloud Blue (15)
+    0x0000, // Black (0)
+    0x9CF3, // Gray (1)
+    0xFFFF, // White (2)
+    0xb926, // Red (3)
+    0xdb71, // Meat (4)
+    0x49e5, // Dark Brown (5)
+    0xa324, // Brown (6)
+    0xec46, // Orange (7)
+    0xf70d, // Yellow (8)
+    0x3249, // Dark Green (9)
+    0x4443, // Green (10)
+    0xa665, // Slime Green (11)
+    0x1926, // Night Blue (12)
+    0x02b0, // Sea Blue (13)
+    0x351d, // Sky Blue (14)
+    0xb6dd  // Cloud Blue (15)
 };
 
 // Canvas
-static bool menuBarOpen = false;
 static int currentBackgroundColorIndex = 0;
 static int currentDrawColorIndex = 11;
 static int currentBrushRadius = 5;
@@ -109,21 +118,22 @@ void setDrawColor(uint8_t colorIndex);
 void drawPixelToFB(int x, int y, uint8_t colorIndex);
 void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex);
 void drawingMenu(bool show);
+void drawMenuButtons();
 
 /** Read from the display, and queue touch points if valid. */
 void handleTouch()
 {
-  static uint16_t localTouchX, localTouchY;
-  //delay(3); // Introducing delay for some reason eliminates crap lines on the screen?? This is an SPI bus issue.
+  uint16_t localTouchX, localTouchY;
+  // delay(2); // Introducing delay for some reason eliminates crap lines on the screen?? This is an SPI bus iss
   if (tft.getTouch(&localTouchX, &localTouchY) && (localTouchX >= 0 && localTouchX < TFT_HOR_RES &&
                                                    localTouchY >= 0 && localTouchY < TFT_VER_RES))
   { // Touching in bounds
     // Serial.print("Touch - X: ");
-    // Serial.print(touchX);
+    // Serial.print(localTouchX);
     // Serial.print(" Y: ");
-    // Serial.println(touchY);
+    // Serial.println(localTouchY);
 
-    // Drop inputs until we reach TOUCH_INPUT_BUFFER
+    // Drop inputs until we exceed TOUCH_INPUT_BUFFER, this prevents smearing from pen pressing on screen.
     if (++touch_count > TOUCH_INPUT_BUFFER)
     {
       if (touch_queue_lastwrite_position < TOUCH_INPUT_BUFFER)
@@ -147,36 +157,93 @@ void handleTouch()
       if (((touch_queue_x[touch_queue_read_position] +
             touch_queue_y[touch_queue_read_position]) > 0))
       {
-        drawBrushToFB(touch_queue_x[touch_queue_read_position], touch_queue_y[touch_queue_read_position], 3, 3);
         touchX = touch_queue_x[touch_queue_read_position];
         touchY = touch_queue_y[touch_queue_read_position];
         touchZ = 1;
-        /** Translate to idiotic LVGL coordinates (I'm sure it makes perfect sense but i hate translations) */
-        // Serial.println("Drawing.");
+        if (active_screen == SCREEN_CANVAS)
+        {
+          drawBrushToFB(touchX, touchY, 3, currentDrawColorIndex);
+        }
+        else if (active_screen == SCREEN_CANVAS_MENU)
+        {
+          for (int button = 0; button < 16; button++)
+          {
+            if (colorButton[button].contains(touchX, touchY))
+            {
+              colorButton[button].press(true);
+            }
+            else
+            {
+              colorButton[button].press(false);
+            }
+          }
+        }
       }
     }
   }
   else
-  { // No longer touching, re-init to zero.
+  { // No longer touching, re-init to zero. Also drops last 10 inputs, preventing smearing.
     touch_count = 0;
     touchZ = 0;
     memset(touch_queue_x, 0, sizeof(touch_queue_x));
     memset(touch_queue_y, 0, sizeof(touch_queue_y));
+    for (int button = 0; button < 16; button++)
+    {
+      colorButton[button].press(false);
+    }
   }
 }
 
 /** Handle button logic based on what screen we are on. */
-void handleTouchButtonUpdate() {
-  for (uint8_t b = 0; b <= 15; b++) {
+void handleTouchButtonUpdate()
+{
+  if (active_screen == SCREEN_CANVAS_MENU)
+  {
+    for (uint8_t b = 0; b < 16; b++)
+    {
 
-    if (colorButton[b].justReleased() && menuBarOpen) colorButton[b].drawButton();     // draw normal
+      if (colorButton[b].justReleased())
+      {
+        colorButton[b].drawButton(); // draw normal
+      }
 
-    if (colorButton[b].justPressed() && menuBarOpen) {
-      colorButton[b].drawButton(true);  // draw invert
+      if (colorButton[b].justPressed())
+      {
+        colorButton[b].drawButton(true); // draw invert
+        setDrawColor(b);
+        drawMenuButtons();
+      }
+    }
+    for (uint8_t b = 0; b < 3; b++)
+    {
+      if (menuButton[b].justReleased())
+      {
+        menuButton[b].drawButton(); // draw normal
+      }
 
-      Serial.print("Touch color");
-      Serial.println(b);
-      setDrawColor(b);
+      if (menuButton[b].justPressed())
+      {
+        menuButton[b].drawButton(true); // draw invert
+        setDrawColor(b);
+        drawMenuButtons();
+      }
+    }
+  }
+  if (active_dropdown == DROPDOWN_TOOLS)
+  {
+    for (uint8_t b = 0; b < 5; b++)
+    {
+
+      if (toolButton[b].justReleased())
+      {
+        toolButton[b].drawButton(); // draw normal
+      }
+
+      if (toolButton[b].justPressed())
+      {
+        toolButton[b].drawButton(true); // draw invert
+        Serial.println("Tool Button Pressed.");
+      }
     }
   }
 }
@@ -185,9 +252,18 @@ void handleTouchButtonUpdate() {
  * just break in the future. Rewrite when necessary :)) Also not sure if this handles
  * rollover correctly.
  */
-void handleMenuButton() {
-  if (digitalRead(MENU_BUTTON_PIN) == LOW) /*Button Pressed*/ {
-    if (lastPress == 0) {
+void handleMenuButton()
+{
+  /** Debouncing nonsense. */
+  static unsigned long lastPress = 0;
+  /** Debouncing nonsense. */
+  static unsigned int lastButtonState = 0;
+  /** Debouncing nonsense. */
+  static bool alreadyPressed = false;
+  if (digitalRead(MENU_BUTTON_PIN) == LOW) /*Button Pressed*/
+  {
+    if (lastPress == 0)
+    {
       lastPress = millis();
     }
     if ((millis() >= (lastPress + DEBOUNCE_MILLISECONDS)) & !alreadyPressed)
@@ -196,10 +272,15 @@ void handleMenuButton() {
       drawingMenu(true);
       alreadyPressed = true;
     }
-    else {return;}
+    else
+    {
+      return;
+    }
   }
-  else /*Button Released*/{
-    if (lastPress) {
+  else /*Button Released*/
+  {
+    if (lastPress)
+    {
       lastPress = 0;
       alreadyPressed = false;
       Serial.println("Logical Release.");
@@ -208,22 +289,39 @@ void handleMenuButton() {
   }
 }
 
-void drawingMenu(bool show) {
-  if (show) {
-    menuBarOpen = true;
-    //tft.fillRect(0, 0, 480, 50, TFT_WHITE);
-    //tft.fillRect(0, 270, 480, 50, TFT_WHITE);
-    for (int col = 0; col <= 15; col++){
+void drawingMenu(bool show)
+{
+  if (show)
+  {
+    active_screen = SCREEN_CANVAS_MENU;
+    // tft.fillRect(0, 0, 480, 50, TFT_WHITE);
+    // tft.fillRect(0, 270, 480, 50, TFT_WHITE);
+    for (int col = 0; col < 16; col++)
+    {
       Serial.print(col);
-      colorButton[col].initButtonUL(&tft, (col*30), (tft.height() - DRAW_MENU_BOTTOM_BAR_HEIGHT_PX), 
-      DRAW_MENU_BOTTOM_BAR_ITEM_WIDTH_PX, DRAW_MENU_BOTTOM_BAR_HEIGHT_PX, 
-      TFT_WHITE, (int)draw_color_palette[col], TFT_WHITE, "", 1, 1);
+      colorButton[col].initButtonUL(&tft, (col * 30), (tft.height() - DRAW_MENU_BOTTOM_BAR_HEIGHT_PX),
+                                    DRAW_MENU_BOTTOM_BAR_ITEM_WIDTH_PX, DRAW_MENU_BOTTOM_BAR_HEIGHT_PX,
+                                    TFT_WHITE, (int)draw_color_palette[col], TFT_WHITE, "", 1, 1);
       colorButton[col].drawButton();
     }
+    drawMenuButtons();
   }
-  else {
-    menuBarOpen = false;
+  else
+  {
+    active_screen = SCREEN_CANVAS;
     updateDisplayWithFB();
+  }
+}
+
+void drawMenuButtons()
+{
+  for (int col = 0; col < 4; col++)
+  {
+    Serial.print(col);
+    menuButton[col].initButtonUL(&tft, (col * 110), 20,
+                                 100, 60,
+                                 TFT_WHITE, (int)draw_color_palette[currentDrawColorIndex], TFT_WHITE, toolButtonLabel[col], 3, 3);
+    menuButton[col].drawButton();
   }
 }
 
@@ -269,7 +367,6 @@ void initSD(bool forceFormat)
   }
 }
 
-
 void initDisplay()
 {
 #ifdef FRIENDBOX_DEBUG_MODE
@@ -285,12 +382,14 @@ void initDisplay()
   tft.drawCenterString("FriendBox", 240, 120);
   tft.setTextSize(3);
   tft.drawCenterString(FRIENDBOX_SOFTWARE_VERSION, 240, 160);
-  
+
   // Allocate framebuffer in ROTATED dimensions
-  canvas_framebuffer = (uint8_t*) malloc((tft.width() * tft.height()) / 2); // 76.8 KB
-  if (!canvas_framebuffer) {
+  canvas_framebuffer = (uint8_t *)malloc((tft.width() * tft.height()) / 2); // 76.8 KB
+  if (!canvas_framebuffer)
+  {
     Serial.println("FATAL: Framebuffer allocation failed!");
-    while(1);
+    while (1)
+      ;
   }
   memset(canvas_framebuffer, 0, (tft.width() * tft.height()) / 2);
 }
@@ -321,6 +420,7 @@ void initTouch(bool forceCalibrate)
       SD.remove("/touch_calibration_file.bin");
     }
     touch_calibration_file.close();
+    SD.end();
   }
 
   if (!calibration_data_ok || forceCalibrate)
@@ -337,7 +437,7 @@ void initTouch(bool forceCalibrate)
     tft.setCursor(160, 40);
     tft.setTextSize(4);
     tft.drawCenterString("Touch Calibration", 240, 70);
-    tft.setTextSize(3);
+    tft.setTextSize(2);
     tft.drawCenterString("Press Highlighted Corners...", 240, 120);
 
     tft.calibrateTouch(calibration_data, TFT_WHITE, TFT_RED, 15);
@@ -365,28 +465,33 @@ void initTouch(bool forceCalibrate)
 
 void drawPixelToFB(int x, int y, uint8_t colorIndex)
 {
-    if (x < 0 || x >= tft.width() || y < 0 || y >= tft.height()) return;
+  if (x < 0 || x >= tft.width() || y < 0 || y >= tft.height())
+    return;
 
-    int index = y * tft.width() + x;
-    int byteIndex = index >> 1;
+  int index = y * tft.width() + x;
+  int byteIndex = index >> 1;
 
-    if (index & 1)
-        canvas_framebuffer[byteIndex] = (canvas_framebuffer[byteIndex] & 0xF0) | (colorIndex & 0x0F);
-    else
-        canvas_framebuffer[byteIndex] = (canvas_framebuffer[byteIndex] & 0x0F) | ((colorIndex & 0x0F) << 4);
+  if (index & 1)
+    canvas_framebuffer[byteIndex] = (canvas_framebuffer[byteIndex] & 0xF0) | (colorIndex & 0x0F);
+  else
+    canvas_framebuffer[byteIndex] = (canvas_framebuffer[byteIndex] & 0x0F) | ((colorIndex & 0x0F) << 4);
 }
 
 // Helper functions to change tool settings
-void setDrawColor(uint8_t colorIndex) {
-  if (colorIndex < 16) {
+void setDrawColor(uint8_t colorIndex)
+{
+  if (colorIndex < 16)
+  {
     Serial.print("Color set to: ");
     Serial.println(colorIndex);
     currentDrawColorIndex = colorIndex;
   }
 }
 
-void setBackgroundColor(uint8_t colorIndex) {
-  if (colorIndex < 16) {
+void setBackgroundColor(uint8_t colorIndex)
+{
+  if (colorIndex < 16)
+  {
     Serial.print("Background color set to: ");
     Serial.println(colorIndex);
     currentBackgroundColorIndex = colorIndex;
@@ -394,28 +499,35 @@ void setBackgroundColor(uint8_t colorIndex) {
   }
 }
 
-void setBrushRadius(int radius) {
-  if (radius > 0 && radius <= 50) {
+void setBrushRadius(int radius)
+{
+  if (radius > 0 && radius <= 50)
+  {
     Serial.print("Brush radius set to: ");
     Serial.println(radius);
   }
 }
 
 /** Draw a circle brush at x,y with given radius and color - Updates BOTH framebuffer and screen in real-time! */
-void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex) {
+void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex)
+{
   // Draw filled circle using midpoint circle algorithm
-  for (int dy = -radius; dy <= radius; dy++) {
-    for (int dx = -radius; dx <= radius; dx++) {
+  for (int dy = -radius; dy <= radius; dy++)
+  {
+    for (int dx = -radius; dx <= radius; dx++)
+    {
       // Check if point is inside circle
-      if (dx * dx + dy * dy <= radius * radius) {
+      if (dx * dx + dy * dy <= radius * radius)
+      {
         int px = x + dx;
         int py = y + dy;
-        
+
         // Draw to framebuffer
         drawPixelToFB(px, py, colorIndex);
-        
+
         // Draw to screen immediately for instant feedback
-        if (px >= 0 && px < tft.width() && py >= 0 && py < tft.height()) {
+        if (px >= 0 && px < tft.width() && py >= 0 && py < tft.height())
+        {
           tft.drawPixel(px, py, draw_color_palette[colorIndex]);
         }
       }
@@ -423,39 +535,47 @@ void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex) {
   }
 }
 
-void drawToolToFB(int radius, draw_tool_id_t tool, uint8_t colorIndex) {
+void drawToolToFB(int radius, draw_tool_id_t tool, uint8_t colorIndex)
+{
 
-  switch (tool) 
+  switch (tool)
   {
-    case TOOL_BRUSH: 
-      break;
-    default:
-      Serial.println("WARN: Trying to draw with an invalid / not implemented tool.");
-      break;
+  case TOOL_BRUSH:
+    break;
+  default:
+    Serial.println("WARN: Trying to draw with an invalid / not implemented tool.");
+    break;
   }
 }
 
-void drawTest4() {
-  for (int y = 0; y < tft.height(); y++) {
-    for (int x = 0; x < tft.width(); x++) {
+void drawTest4()
+{
+  for (int y = 0; y < tft.height(); y++)
+  {
+    for (int x = 0; x < tft.width(); x++)
+    {
       uint8_t color = (x >> 5) & 0x0F; // 16 vertical stripes
       drawPixelToFB(x, y, color);
     }
   }
 }
 
-void saveImageToSD() {
+void saveImageToSD()
+{
   File f = SD.open("/fb4.bin", FILE_WRITE);
-  if (f) {
+  if (f)
+  {
     f.write(canvas_framebuffer, (tft.width() * tft.height()) / 2);
     f.close();
     Serial.println("Image saved!");
   }
 }
 
-void loadImageFromSD() {
+void loadImageFromSD()
+{
   File f = SD.open("/fb4.bin", FILE_READ);
-  if (f) {
+  if (f)
+  {
     f.read(canvas_framebuffer, (tft.width() * tft.height()) / 2);
     f.close();
     updateDisplayWithFB();
@@ -464,11 +584,13 @@ void loadImageFromSD() {
 }
 
 /** Wipe entire screen and replace with contents of the 4-bit color framebuffer. */
-void updateDisplayWithFB() {
+void updateDisplayWithFB()
+{
   tft.startWrite();
   tft.setAddrWindow(0, 0, tft.width(), tft.height());
 
-  for (int i = 0; i < (tft.width() * tft.height()) / 2; i++) {
+  for (int i = 0; i < (tft.width() * tft.height()) / 2; i++)
+  {
     uint8_t b = canvas_framebuffer[i];
     tft.pushColor(draw_color_palette[b >> 4]);
     tft.pushColor(draw_color_palette[b & 0x0F]);
@@ -477,37 +599,39 @@ void updateDisplayWithFB() {
   tft.endWrite();
 }
 
-void handleSerialCommand() {
-  if (Serial.available()) {
+void handleSerialCommand()
+{
+  if (Serial.available())
+  {
     serialCommand = Serial.readStringUntil('\n');
     serialCommand.toLowerCase();
     serialCommand.trim();
-    if (serialCommand.equals("drawpattern")) 
+    if (serialCommand.equals("drawpattern"))
     {
       drawTest4();
       updateDisplayWithFB();
     }
-    else if (serialCommand.equals("save")) 
+    else if (serialCommand.equals("save"))
     {
       saveImageToSD();
     }
-    else if (serialCommand.equals("load")) 
+    else if (serialCommand.equals("load"))
     {
       loadImageFromSD();
     }
-    else if (serialCommand.equals("setcolor")) 
+    else if (serialCommand.equals("setcolor"))
     {
       int argument1 = NULL;
       Serial.println("Please select fan speed (1-6):");
-      while (!argument1) 
+      while (!argument1)
       {
         argument1 = Serial.readStringUntil('\n').toInt();
       }
       Serial.print("Selected fan speed: ");
       Serial.println(String(argument1));
       setDrawColor(argument1);
-    } 
-    else 
+    }
+    else
     {
       Serial.println("Invalid command!");
     }
