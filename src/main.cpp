@@ -23,10 +23,16 @@ static uint16_t touch_queue_x[TOUCH_INPUT_BUFFER] = {0}, touch_queue_y[TOUCH_INP
 static uint8_t touch_queue_lastwrite_position = 0;
 /** These buttons select the current active color. */
 LGFX_Button colorButton[16];
-LGFX_Button menuButton[4];
-static char *toolButtonLabel[4] = {"Tools", "Bens", "Save", "Load"};
+LGFX_Button menuButton[5];
 LGFX_Button toolButton[5];
-LGFX_Button actionButton[4];
+static char *toolButtonLabel[5] = {"Pencil", "Brush", "Dither", "Fill", "Noise"};
+LGFX_Button actionButton[5];
+static char *actionButtonLabel[5] = {"Tools", "Clear", "Send", "Save", "Load"};
+LGFX_Button saveButton[5];
+static char *saveButtonLabel[5] = {"Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5"};
+LGFX_Button loadButton[5];
+static char *loadButtonLabel[5] = {"Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5"};
+// save slots!!!!
 
 // Input (Buttons)
 /** Which GPIO pin will be used as input for the menu button? */
@@ -66,8 +72,10 @@ typedef enum
 {
   DROPDOWN_NONE,
   DROPDOWN_TOOLS,
-  DROPDOWN_DISK,
-  DROPDOWN_SHARE
+  DROPDOWN_CLEAR,
+  DROPDOWN_SEND,
+  DROPDOWN_SAVE,
+  DROPDOWN_LOAD
 } canvas_dropdown_id_t;
 static screen_id_t active_screen;
 static canvas_dropdown_id_t active_dropdown;
@@ -96,11 +104,17 @@ uint16_t draw_color_palette[16] = {
 
 // Canvas
 static int currentBackgroundColorIndex = 0;
-static int currentDrawColorIndex = 11;
+static int currentDrawColorIndex = 2;
 static int currentBrushRadius = 5;
-#define DRAW_MENU_TOP_BAR_HEIGHT_PX 50
-#define DRAW_MENU_BOTTOM_BAR_HEIGHT_PX 25
-#define DRAW_MENU_BOTTOM_BAR_ITEM_WIDTH_PX 27
+
+// UI
+#define CANVAS_DRAW_MENU_TOP_BAR_DIST_FROM_TOP_PX 5
+#define CANVAS_DRAW_MENU_TOP_BAR_HEIGHT_PX 50
+#define CANVAS_DRAW_MENU_TOP_BAR_ITEM_WIDTH_PX 80
+#define CANVAS_DRAW_MENU_BOTTOM_BAR_DIST_FROM_BOTTOM_PX 0
+#define CANVAS_DRAW_MENU_BOTTOM_BAR_HEIGHT_PX 25
+#define CANVAS_DRAW_MENU_BOTTOM_BAR_ITEM_WIDTH_PX 27
+#define CANVAS_DRAW_MENU_DROPDOWN_DIST_BETWEEN_ITEMS 5
 
 // Network
 #define LOCAL_HOSTNAME "friendbox"
@@ -114,11 +128,17 @@ SPIClass sdspi = SPIClass(HSPI);
 
 // Functions
 void updateDisplayWithFB();
+void handleMenuButton(bool recheckInput);
 void setDrawColor(uint8_t colorIndex);
 void drawPixelToFB(int x, int y, uint8_t colorIndex);
 void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex);
-void drawingMenu(bool show);
-void drawMenuButtons();
+void drawCanvasMenu(bool show);
+void drawCanvasMenuTools();
+void drawClearScreen();
+void drawCanvasMenuSave();
+void drawCanvasMenuLoad();
+void saveImageToSD(int slot);
+void loadImageFromSD(int slot);
 
 /** Read from the display, and queue touch points if valid. */
 void handleTouch()
@@ -164,33 +184,17 @@ void handleTouch()
         {
           drawBrushToFB(touchX, touchY, 3, currentDrawColorIndex);
         }
-        else if (active_screen == SCREEN_CANVAS_MENU)
-        {
-          for (int button = 0; button < 16; button++)
-          {
-            if (colorButton[button].contains(touchX, touchY))
-            {
-              colorButton[button].press(true);
-            }
-            else
-            {
-              colorButton[button].press(false);
-            }
-          }
-        }
       }
     }
   }
   else
   { // No longer touching, re-init to zero. Also drops last 10 inputs, preventing smearing.
     touch_count = 0;
-    touchZ = 0;
     memset(touch_queue_x, 0, sizeof(touch_queue_x));
     memset(touch_queue_y, 0, sizeof(touch_queue_y));
-    for (int button = 0; button < 16; button++)
-    {
-      colorButton[button].press(false);
-    }
+    touchX = 0;
+    touchY = 0;
+    touchZ = 0;
   }
 }
 
@@ -201,58 +205,98 @@ void handleTouchButtonUpdate()
   {
     for (uint8_t b = 0; b < 16; b++)
     {
-
+      bool touching = touchZ && colorButton[b].contains(touchX, touchY);
+      colorButton[b].press(touching);
       if (colorButton[b].justReleased())
       {
-        colorButton[b].drawButton(); // draw normal
+        colorButton[b].drawButton(false);
+        Serial.println("Unpress.");
       }
 
       if (colorButton[b].justPressed())
       {
-        colorButton[b].drawButton(true); // draw invert
+        colorButton[b].drawButton(true);
+        Serial.println("Press.");
         setDrawColor(b);
-        drawMenuButtons();
+        drawCanvasMenuTools();
       }
     }
-    for (uint8_t b = 0; b < 3; b++)
-    {
-      if (menuButton[b].justReleased())
-      {
-        menuButton[b].drawButton(); // draw normal
-      }
-
-      if (menuButton[b].justPressed())
-      {
-        menuButton[b].drawButton(true); // draw invert
-        setDrawColor(b);
-        drawMenuButtons();
-      }
-    }
-  }
-  if (active_dropdown == DROPDOWN_TOOLS)
-  {
     for (uint8_t b = 0; b < 5; b++)
     {
+      bool touching = touchZ && actionButton[b].contains(touchX, touchY);
+      actionButton[b].press(touching);
 
-      if (toolButton[b].justReleased())
+      if (actionButton[b].justReleased())
       {
-        toolButton[b].drawButton(); // draw normal
+        actionButton[b].drawButton();
       }
 
-      if (toolButton[b].justPressed())
+      if (actionButton[b].justPressed())
       {
-        toolButton[b].drawButton(true); // draw invert
-        Serial.println("Tool Button Pressed.");
+        actionButton[b].drawButton(true);
+        switch (b)
+        {
+        case 2:
+          drawClearScreen();
+          drawCanvasMenu(true);
+          break;
+        case 3:
+          // saveImageToSD(0);
+          drawCanvasMenuSave();
+          break;
+        case 4:
+          // loadImageFromSD(0);
+          drawCanvasMenuLoad();
+          // drawCanvasMenu(true);
+          // Serial.println("Loading ");
+          break;
+        default:
+          break;
+        }
+        // setDrawColor(b);
+      }
+    }
+    if (active_dropdown == DROPDOWN_TOOLS)
+    {
+      for (uint8_t b = 0; b < 5; b++)
+      {
+
+        if (toolButton[b].justReleased())
+        {
+          toolButton[b].drawButton(); // draw normal
+        }
+
+        if (toolButton[b].justPressed())
+        {
+          toolButton[b].drawButton(true); // draw invert
+          Serial.println("Tool Button Pressed.");
+        }
+      }
+    }
+    if (active_dropdown == DROPDOWN_LOAD) {
+      for (uint8_t b = 0; b < 5; b++)
+      {
+
+        if (toolButton[b].justReleased())
+        {
+          toolButton[b].drawButton(); // draw normal
+          drawCanvasMenu(true);
+        }
+
+        if (toolButton[b].justPressed())
+        {
+          toolButton[b].drawButton(true); // draw invert
+          Serial.println("Load Button Pressed.");
+        }
       }
     }
   }
 }
 
-/** This is pretty much useless as it doesn't debounce release, so it will probably
- * just break in the future. Rewrite when necessary :)) Also not sure if this handles
- * rollover correctly.
- */
-void handleMenuButton()
+/** Handle pressing of hardware button, will implement as hall effect sensor later 
+ * recheckInput will register another logical press even if button is being held.
+*/
+void handleMenuButton(bool recheckInput)
 {
   /** Debouncing nonsense. */
   static unsigned long lastPress = 0;
@@ -266,10 +310,10 @@ void handleMenuButton()
     {
       lastPress = millis();
     }
-    if ((millis() >= (lastPress + DEBOUNCE_MILLISECONDS)) & !alreadyPressed)
+    if (((millis() >= (lastPress + DEBOUNCE_MILLISECONDS)) & !alreadyPressed) || recheckInput)
     {
       Serial.println("Logical Press");
-      drawingMenu(true);
+      drawCanvasMenu(true);
       alreadyPressed = true;
     }
     else
@@ -284,12 +328,12 @@ void handleMenuButton()
       lastPress = 0;
       alreadyPressed = false;
       Serial.println("Logical Release.");
-      drawingMenu(false);
+      drawCanvasMenu(false);
     }
   }
 }
 
-void drawingMenu(bool show)
+void drawCanvasMenu(bool show)
 {
   if (show)
   {
@@ -298,13 +342,12 @@ void drawingMenu(bool show)
     // tft.fillRect(0, 270, 480, 50, TFT_WHITE);
     for (int col = 0; col < 16; col++)
     {
-      Serial.print(col);
-      colorButton[col].initButtonUL(&tft, (col * 30), (tft.height() - DRAW_MENU_BOTTOM_BAR_HEIGHT_PX),
-                                    DRAW_MENU_BOTTOM_BAR_ITEM_WIDTH_PX, DRAW_MENU_BOTTOM_BAR_HEIGHT_PX,
+      colorButton[col].initButtonUL(&tft, (col * 30), (tft.height() - CANVAS_DRAW_MENU_BOTTOM_BAR_HEIGHT_PX),
+                                    CANVAS_DRAW_MENU_BOTTOM_BAR_ITEM_WIDTH_PX, CANVAS_DRAW_MENU_BOTTOM_BAR_HEIGHT_PX,
                                     TFT_WHITE, (int)draw_color_palette[col], TFT_WHITE, "", 1, 1);
       colorButton[col].drawButton();
     }
-    drawMenuButtons();
+    drawCanvasMenuTools();
   }
   else
   {
@@ -313,15 +356,39 @@ void drawingMenu(bool show)
   }
 }
 
-void drawMenuButtons()
+void drawCanvasMenuTools()
 {
-  for (int col = 0; col < 4; col++)
+  active_dropdown == DROPDOWN_NONE;
+  for (int col = 0; col < 5; col++)
   {
-    Serial.print(col);
-    menuButton[col].initButtonUL(&tft, (col * 110), 20,
-                                 100, 60,
-                                 TFT_WHITE, (int)draw_color_palette[currentDrawColorIndex], TFT_WHITE, toolButtonLabel[col], 3, 3);
-    menuButton[col].drawButton();
+    actionButton[col].initButtonUL(&tft, (col * 96), 10,
+                                   CANVAS_DRAW_MENU_TOP_BAR_ITEM_WIDTH_PX, CANVAS_DRAW_MENU_TOP_BAR_HEIGHT_PX,
+                                   TFT_WHITE, (int)draw_color_palette[currentDrawColorIndex], TFT_WHITE, actionButtonLabel[col], 2, 2);
+    actionButton[col].drawButton();
+  }
+}
+
+void drawCanvasMenuSave()
+{
+  active_dropdown == DROPDOWN_SAVE;
+  for (int col = 0; col < 5; col++)
+  {
+    saveButton[col].initButtonUL(&tft, (3 * 96), (col * 40 + CANVAS_DRAW_MENU_TOP_BAR_HEIGHT_PX + CANVAS_DRAW_MENU_TOP_BAR_DIST_FROM_TOP_PX + CANVAS_DRAW_MENU_DROPDOWN_DIST_BETWEEN_ITEMS),
+                                 CANVAS_DRAW_MENU_TOP_BAR_ITEM_WIDTH_PX, CANVAS_DRAW_MENU_TOP_BAR_HEIGHT_PX,
+                                 TFT_WHITE, (int)draw_color_palette[currentDrawColorIndex], TFT_WHITE, saveButtonLabel[col], 2, 2);
+    saveButton[col].drawButton();
+  }
+}
+
+void drawCanvasMenuLoad()
+{
+  active_dropdown == DROPDOWN_LOAD;
+  for (int col = 0; col < 5; col++)
+  {
+    loadButton[col].initButtonUL(&tft, (4 * 96), (col * 40 + CANVAS_DRAW_MENU_TOP_BAR_HEIGHT_PX + CANVAS_DRAW_MENU_TOP_BAR_DIST_FROM_TOP_PX + CANVAS_DRAW_MENU_DROPDOWN_DIST_BETWEEN_ITEMS),
+                                 CANVAS_DRAW_MENU_TOP_BAR_ITEM_WIDTH_PX, CANVAS_DRAW_MENU_TOP_BAR_HEIGHT_PX,
+                                 TFT_WHITE, (int)draw_color_palette[currentDrawColorIndex], TFT_WHITE, loadButtonLabel[col], 2, 2);
+    loadButton[col].drawButton();
   }
 }
 
@@ -420,7 +487,7 @@ void initTouch(bool forceCalibrate)
       SD.remove("/touch_calibration_file.bin");
     }
     touch_calibration_file.close();
-    SD.end();
+    // SD.end();
   }
 
   if (!calibration_data_ok || forceCalibrate)
@@ -560,26 +627,52 @@ void drawTest4()
   }
 }
 
-void saveImageToSD()
+void drawClearScreen()
 {
-  File f = SD.open("/fb4.bin", FILE_WRITE);
+  for (int y = 0; y < tft.height(); y++)
+  {
+    for (int x = 0; x < tft.width(); x++)
+    {
+      drawPixelToFB(x, y, 0);
+    }
+  }
+  updateDisplayWithFB();
+}
+
+void saveImageToSD(int slot)
+{
+  char filename[20];
+  snprintf(filename, sizeof(filename), "/slot%d.bin", slot);
+
+  File f = SD.open(filename, FILE_WRITE);
   if (f)
   {
     f.write(canvas_framebuffer, (tft.width() * tft.height()) / 2);
     f.close();
-    Serial.println("Image saved!");
+    #ifdef FRIENDBOX_DEBUG_MODE
+    Serial.print("Saved image to save slot ");
+    Serial.print(slot);
+    Serial.println("!");
+    #endif
   }
 }
 
-void loadImageFromSD()
+void loadImageFromSD(int slot)
 {
-  File f = SD.open("/fb4.bin", FILE_READ);
+  char filename[20];
+  snprintf(filename, sizeof(filename), "/slot%d.bin", slot);
+
+  File f = SD.open(filename, FILE_READ);
   if (f)
   {
     f.read(canvas_framebuffer, (tft.width() * tft.height()) / 2);
     f.close();
     updateDisplayWithFB();
-    Serial.println("Image loaded!");
+    #ifdef FRIENDBOX_DEBUG_MODE
+    Serial.print("Loaded image from save slot ");
+    Serial.print(slot);
+    Serial.println("!");
+    #endif
   }
 }
 
@@ -613,11 +706,11 @@ void handleSerialCommand()
     }
     else if (serialCommand.equals("save"))
     {
-      saveImageToSD();
+      saveImageToSD(0);
     }
     else if (serialCommand.equals("load"))
     {
-      loadImageFromSD();
+      loadImageFromSD(0);
     }
     else if (serialCommand.equals("setcolor"))
     {
@@ -655,5 +748,5 @@ void loop()
   handleTouchButtonUpdate();
   handleSerialCommand();
   // We just gotta run this on loop until we can set up interrupts.
-  handleMenuButton();
+  handleMenuButton(false);
 }
