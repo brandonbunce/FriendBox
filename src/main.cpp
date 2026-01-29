@@ -5,6 +5,7 @@
 #include <LGFX_ESP32_ST7796S_XPT2046.hpp>
 #include <SPI.h>
 #include <SD.h>
+#include "driver/i2s.h"
 #include "secrets.h"
 
 // (C) 2025-2026 Brandon Bunce - FriendBox System Software
@@ -13,6 +14,10 @@
 
 // Touch
 uint16_t touchX, touchY, touchZ; // Z:0 = no touch, Z>0 = touching
+// Stores millis() value from last recorded input.
+static unsigned long lastTouch = 0;
+// For how many milliseconds after last input should we count before registering release?
+#define UI_TOUCH_INPUT_BUFFER_MS 
 /** How many "inputs" should we drop after intial touch and liftoff? */
 #define TOUCH_INPUT_BUFFER 10
 /** How many times we have registered a touch input. */
@@ -30,7 +35,7 @@ static const char *actionButtonLabel[ACTION_BUTTON_COUNT] = {"Tools", "Send", "S
 LGFX_Button toolButton[TOOL_DROPDOWN_BUTTON_COUNT];
 static const char *toolButtonLabel[TOOL_DROPDOWN_BUTTON_COUNT] = {"Pencil", "Brush", "Fill", "Noise", "Dither", "Sticker"};
 LGFX_Button settingsButton;
-static const char *settingsButtonLabel = "Settings";
+static const char *settingsButtonLabel = "Set Size";
 #define SAVE_DROPDOWN_BUTTON_COUNT 7
 LGFX_Button saveButton[SAVE_DROPDOWN_BUTTON_COUNT];
 static const char *saveButtonLabel[SAVE_DROPDOWN_BUTTON_COUNT] = {"Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5", "Slot 6", "Slot 7"};
@@ -219,6 +224,7 @@ void handleTouch()
     memset(touch_queue_y, 0, sizeof(touch_queue_y));
     touchX = 0;
     touchY = 0;
+    touchZ = millis();
     touchZ = 0;
   }
 }
@@ -312,12 +318,18 @@ void handleTouchButtonUpdate()
         bool touching = touchZ && toolButton[b].contains(touchX, touchY);
         toolButton[b].press(touching);
 
-        if (toolButton[b].justReleased() && (b != active_tool))
+        if (toolButton[b].justReleased())
         {
-          toolButton[b].drawButton(); // draw normal
-          if (!touchZ) {
+          Serial.println("Tool Button Released.");
+          if (!touchZ)
+          {
+            Serial.println("Tool Button Logical Release.");
             active_tool = draw_tool_id_t(b);
             drawCanvasMenu(true, true, false, false, false);
+          }
+          if (b != active_tool)
+          {
+            toolButton[b].drawButton(); // draw normal
           }
         }
 
@@ -422,7 +434,7 @@ void handleMenuButton(bool recheckInput)
   }
   else /*Button Released*/
   {
-    if (lastPress)
+    if (lastPress && alreadyPressed)
     {
       lastPress = 0;
       alreadyPressed = false;
@@ -494,7 +506,7 @@ void drawCanvasMenu(bool show, bool wipeScreen, bool skipColorDraw, bool skipAct
         {
         case TOOL_PENCIL:
           settingsButton.initButtonUL(&tft, ACTION_BUTTON_X_POS(1),
-                                      ((2) * (CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX + CANVAS_DRAW_MENU_DROPDOWN_DIST_BETWEEN_ITEMS) + CANVAS_DRAW_MENU_TOP_BAR_DIST_FROM_TOP_PX + CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX),
+                                      ((1) * (CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX + CANVAS_DRAW_MENU_DROPDOWN_DIST_BETWEEN_ITEMS) + CANVAS_DRAW_MENU_TOP_BAR_DIST_FROM_TOP_PX + CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX),
                                       CANVAS_DRAW_MENU_TOP_BAR_ITEM_WIDTH_PX, CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX,
                                       TFT_WHITE, (int)draw_color_palette[currentDrawColorIndex], (int)draw_color_palette_text_color[currentDrawColorIndex], settingsButtonLabel, 2, 2);
           settingsButton.drawButton();
