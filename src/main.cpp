@@ -5,7 +5,8 @@
 #include <LGFX_ESP32_ST7796S_XPT2046.hpp>
 #include <SPI.h>
 #include <SD.h>
-#include "driver/i2s.h"
+#include <ESP32I2SAudio.h>
+#include <BackgroundAudio.h>
 #include "secrets.h"
 
 // (C) 2025-2026 Brandon Bunce - FriendBox System Software
@@ -42,8 +43,8 @@ static const char *saveButtonLabel[SAVE_DROPDOWN_BUTTON_COUNT] = {"Slot 1", "Slo
 #define LOAD_DROPDOWN_BUTTON_COUNT 7
 LGFX_Button loadButton[LOAD_DROPDOWN_BUTTON_COUNT];
 static const char *loadButtonLabel[LOAD_DROPDOWN_BUTTON_COUNT] = {"Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5", "Slot 6", "Slot 7"};
-// Input (Buttons)
-/** Which GPIO pin will be used as input for the menu button? */
+static int lastActiveSlot = 0;
+// Input (Buttons)** Which GPIO pin will be used as input for the menu button? */
 #define MENU_BUTTON_PIN 0
 #define HALL_SENSOR_PIN 27
 /** How long should button be pressed before logically registering input? */
@@ -162,6 +163,15 @@ SPIClass sdspi = SPIClass(HSPI);
 #define SD_SCK 14
 #define SD_MISO 32
 #define SD_MOSI 13
+
+// Audio
+//const int audio_buff_size = 128;
+//int available_bytes, read_bytes;
+//uint8_t buffer[audio_buff_size];
+//I2SClass I2S;
+ESP32I2SAudio audio(16, 17, 5);
+BackgroundAudioMP3 mp3(audio);
+  static uint8_t soundbuffer[8192];
 
 // Functions
 void updateDisplayWithFB();
@@ -603,7 +613,16 @@ void initSD(bool forceFormat)
     Serial.println("ERROR: SD mount failed! Is it connected properly?");
 #endif
     // Todo - Show on-screen error.
-    return;
+    tft.setTextSize(2);
+    tft.setCursor(0, 5);
+    tft.println("FATAL: SD mount failed.");
+    tft.print("Re-attempting.");
+    while (!SD.begin(SD_CS, sdspi)) {
+      tft.print(".");
+      delay(1000);
+    }
+    tft.println("SD was mounted!");
+    delay(500);
   }
   else
   {
@@ -709,6 +728,12 @@ void initTouch(bool forceCalibrate)
   tft.setTouchCalibrate(calibration_data);
 }
 
+void initSound() {
+  Serial.println("playing sound");
+  File startup_sound_file = SD.open("/pumpkin.wav", FILE_READ);
+  startup_sound_file.read(soundbuffer, 8192);
+  startup_sound_file.close();
+}
 void drawPixelToFB(int x, int y, uint8_t colorIndex)
 {
   if (x < 0 || x >= tft.width() || y < 0 || y >= tft.height())
@@ -822,7 +847,6 @@ void saveImageToSD(int slot)
 {
   char filename[20];
   snprintf(filename, sizeof(filename), "/slot%d.bin", slot);
-
   File f = SD.open(filename, FILE_WRITE);
   if (f)
   {
@@ -832,6 +856,7 @@ void saveImageToSD(int slot)
     Serial.print("Saved image to save slot ");
     Serial.print(slot);
     Serial.println("!");
+    lastActiveSlot = slot;
 #endif
   }
 }
@@ -851,6 +876,7 @@ void loadImageFromSD(int slot)
     Serial.print("Loaded image from save slot ");
     Serial.print(slot);
     Serial.println("!");
+    lastActiveSlot = slot;
 #endif
   }
 }
@@ -878,9 +904,11 @@ void setup()
   initDisplay();
   initSD(false);
   initTouch(false);
+  //initSound();
   // initNetwork(NETWORK_SSID, NETWORK_PASS, LOCAL_HOSTNAME);
   // pinMode(MENU_BUTTON_PIN, INPUT);
   pinMode(HALL_SENSOR_PIN, INPUT_PULLUP);
+  loadImageFromSD(lastActiveSlot);
 }
 
 void loop()
@@ -890,4 +918,5 @@ void loop()
   handleTouchButtonUpdate();
   // We just gotta run this on loop until we can set up interrupts.
   handleMenuButton(false);
+  //audio.write(soundbuffer, 8192);
 }
