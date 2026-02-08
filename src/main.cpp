@@ -5,52 +5,19 @@
 #include <LGFX_ESP32_ST7796S_XPT2046.hpp>
 #include <SPI.h>
 #include <SD.h>
-#include <ESP32I2SAudio.h>
-#include <BackgroundAudio.h>
 #include "secrets.h"
+#include <Preferences.h>
+#include <vector>
 
 // (C) 2025-2026 Brandon Bunce - FriendBox System Software
 #define FRIENDBOX_DEBUG_MODE true
-#define FRIENDBOX_SOFTWARE_VERSION "Software v0.2 (NO-LVGL)"
+#define FRIENDBOX_SOFTWARE_VERSION "Software v0.3 (MAIN)"
 
-// Touch
-uint16_t touchX, touchY, touchZ; // Z:0 = no touch, Z>0 = touching
-// Stores millis() value from last recorded input.
-static unsigned long lastTouch = 0;
-// For how many milliseconds after last input should we count before registering release?
-#define UI_TOUCH_INPUT_BUFFER_MS 
-/** How many "inputs" should we drop after intial touch and liftoff? */
-#define TOUCH_INPUT_BUFFER 10
-/** How many times we have registered a touch input. */
-static uint16_t touch_count = 0;
-/** Touch inputs waiting to be drawn (insane asylum) */
-static uint16_t touch_queue_x[TOUCH_INPUT_BUFFER] = {0}, touch_queue_y[TOUCH_INPUT_BUFFER] = {0};
-/** Last written value(s) in the touch queue. */
-static uint8_t touch_queue_lastwrite_position = 0;
-/** These buttons select the current active color. */
-LGFX_Button colorButton[16];
-#define ACTION_BUTTON_COUNT 4
-LGFX_Button actionButton[ACTION_BUTTON_COUNT];
-static const char *actionButtonLabel[ACTION_BUTTON_COUNT] = {"Tools", "Send", "Save", "Load"};
-#define TOOL_DROPDOWN_BUTTON_COUNT 6
-LGFX_Button toolButton[TOOL_DROPDOWN_BUTTON_COUNT];
-static const char *toolButtonLabel[TOOL_DROPDOWN_BUTTON_COUNT] = {"Pencil", "Brush", "Fill", "Noise", "Dither", "Sticker"};
-LGFX_Button settingsButton;
-static const char *settingsButtonLabel = "Set Size";
-#define SAVE_DROPDOWN_BUTTON_COUNT 7
-LGFX_Button saveButton[SAVE_DROPDOWN_BUTTON_COUNT];
-static const char *saveButtonLabel[SAVE_DROPDOWN_BUTTON_COUNT] = {"Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5", "Slot 6", "Slot 7"};
-#define LOAD_DROPDOWN_BUTTON_COUNT 7
-LGFX_Button loadButton[LOAD_DROPDOWN_BUTTON_COUNT];
-static const char *loadButtonLabel[LOAD_DROPDOWN_BUTTON_COUNT] = {"Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5", "Slot 6", "Slot 7"};
-static int lastActiveSlot = 0;
-// Input (Buttons)** Which GPIO pin will be used as input for the menu button? */
-#define MENU_BUTTON_PIN 0
+// Input (Buttons)
+/** Which GPIO pin will be used as input for the hall effect button? */
 #define HALL_SENSOR_PIN 27
 /** How long should button be pressed before logically registering input? */
 #define DEBOUNCE_MILLISECONDS 50
-/** Variable for incoming serial command. */
-String serialCommand;
 
 // Output (LED)
 
@@ -59,7 +26,10 @@ String serialCommand;
 static LGFX tft;
 #define TFT_HOR_RES 480
 #define TFT_VER_RES 320
+
+/* Stores our image drawing buffer. About ~76.8kb! */
 uint8_t *canvas_framebuffer;
+
 /** Defines tools that we can use on the canvas. */
 typedef enum
 {
@@ -70,7 +40,8 @@ typedef enum
   TOOL_DITHER,
   TOOL_STICKER
 } draw_tool_id_t;
-/** Defines the menus we can be in. */
+
+/** Defines the UI context we are currently in */
 typedef enum
 {
   SCREEN_CANVAS,
@@ -79,18 +50,32 @@ typedef enum
   SCREEN_WELCOME,
   SCREEN_NETWORK_SETTINGS
 } screen_id_t;
-/** Defines what dropdown (if any) is visible in SCREEN_CANVAS_MENU */
+
+/* Defines what dropdown we're in in SCREEN_CANVAS_MENU. */
 typedef enum
 {
   DROPDOWN_NONE,
+  DROPDOWN_MENU,
   DROPDOWN_TOOLS,
-  DROPDOWN_SEND,
   DROPDOWN_SAVE,
   DROPDOWN_LOAD
-} canvas_dropdown_id_t;
-static draw_tool_id_t active_tool = TOOL_BRUSH;
-static screen_id_t active_screen;
-static canvas_dropdown_id_t active_dropdown;
+} dropdown_id_t;
+
+struct UIButton
+{
+  LGFX_Button button;
+  int x, y, w, h;
+  bool isDrawn = false;
+  screen_id_t screenContext;
+  dropdown_id_t dropdownContext = DROPDOWN_NONE;
+  int fillColor;
+};
+
+std::vector<UIButton *> uiButtons;
+
+static draw_tool_id_t currentTool = TOOL_BRUSH;
+static screen_id_t currentScreen;
+static dropdown_id_t currentDropdown = DROPDOWN_NONE;
 
 /** Defines color palette for our 4-bit color frame buffer.
  * Color palette is from https://androidarts.com/palette/16pal.htm
@@ -138,6 +123,42 @@ uint16_t draw_color_palette_text_color[16] = {
 static int currentBackgroundColorIndex = 0;
 static int currentDrawColorIndex = 2;
 static int currentBrushRadius = 5;
+static int currentSaveSlot = 0;
+
+// Touch
+uint16_t touchX, touchY, touchZ; // Z:0 = no touch, Z>0 = touching
+// Stores millis() value from last recorded input.
+static unsigned long lastTouchTime = 0;
+// For how many milliseconds after last input should we count before registering release?
+#define UI_TOUCH_INPUT_BUFFER_MS
+/** How many "inputs" should we drop after intial touch and liftoff? */
+#define TOUCH_INPUT_BUFFER 10
+/** Stores how many times we have registered a touch input. */
+static uint16_t touch_count = 0;
+/** Touch inputs waiting to be drawn (insane asylum) */
+static uint16_t touch_queue_x[TOUCH_INPUT_BUFFER] = {0}, touch_queue_y[TOUCH_INPUT_BUFFER] = {0};
+/** Last written value(s) in the touch queue. */
+static uint8_t touch_queue_lastwrite_position = 0;
+/** These buttons select the current active color. */
+UIButton colorButton[16];
+/* Defines action buttons at top of CANVAS_MENU.*/
+#define ACTION_BUTTON_COUNT 4
+UIButton actionButton[ACTION_BUTTON_COUNT];
+static const char *actionButtonLabel[ACTION_BUTTON_COUNT] = {"Menu", "Tools", "Save", "Load"};
+/* Defines dropdown buttons on CANVAS_MENU. */
+#define TOOL_DROPDOWN_BUTTON_COUNT 6
+UIButton toolButton[TOOL_DROPDOWN_BUTTON_COUNT];
+static const char *toolButtonLabel[TOOL_DROPDOWN_BUTTON_COUNT] = {"Pencil", "Brush", "Fill", "Noise", "Dither", "Sticker"};
+UIButton settingsButton;
+static const char *settingsButtonLabel = "Set Size";
+#define FBOX_DROPDOWN_BUTTON_COUNT 3
+UIButton menuButton[FBOX_DROPDOWN_BUTTON_COUNT];
+static const char *menuButtonLabel[FBOX_DROPDOWN_BUTTON_COUNT] = {"Home", "Send", "Restart"};
+#define SLOT_DROPDOWN_BUTTON_COUNT 7
+UIButton saveButton[SLOT_DROPDOWN_BUTTON_COUNT];
+static const char *saveButtonLabel[SLOT_DROPDOWN_BUTTON_COUNT] = {"Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5", "Slot 6", "Slot 7"};
+UIButton loadButton[SLOT_DROPDOWN_BUTTON_COUNT];
+static const char *loadButtonLabel[SLOT_DROPDOWN_BUTTON_COUNT] = {"Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5", "Slot 6", "Slot 7"};
 
 // UI
 #define CANVAS_DRAW_MENU_TOP_BAR_DIST_FROM_TOP_PX 5
@@ -158,6 +179,7 @@ static int currentBrushRadius = 5;
 #define LOCAL_HOSTNAME "friendbox"
 
 // Storage
+Preferences nvs; // https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/storage/nvs_flash.html
 SPIClass sdspi = SPIClass(HSPI);
 #define SD_CS 26
 #define SD_SCK 14
@@ -165,30 +187,27 @@ SPIClass sdspi = SPIClass(HSPI);
 #define SD_MOSI 13
 
 // Audio
-//const int audio_buff_size = 128;
-//int available_bytes, read_bytes;
-//uint8_t buffer[audio_buff_size];
-//I2SClass I2S;
-ESP32I2SAudio audio(16, 17, 5);
-BackgroundAudioMP3 mp3(audio);
-  static uint8_t soundbuffer[8192];
+// Worry about this later.
 
 // Functions
-void updateDisplayWithFB();
 void handleMenuButton(bool recheckInput);
 void setDrawColor(uint8_t colorIndex);
 void drawPixelToFB(int x, int y, uint8_t colorIndex);
 void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex);
-void drawCanvasMenu(bool show, bool wipeScreen, bool skipColorDraw, bool skipActionDraw, bool skipDropdownDraw);
+void newDrawCanvasMenu();
 void drawClearScreen();
 void saveImageToSD(int slot);
 void loadImageFromSD(int slot);
+void drawBaseCanvasMenu();
+void drawFramebuffer(int x = 0, int y = 0, int w = TFT_HOR_RES, int h = TFT_VER_RES);
+void cleanupUIOutOfContext();
+void drawActionBar();
+void changeScreenContext(screen_id_t targetScreen);
 
 /** Read from the display, and queue touch points if valid. */
 void handleTouch()
 {
   uint16_t localTouchX, localTouchY;
-  // delay(2); // Introducing delay for some reason eliminates crap lines on the screen?? This is an SPI bus iss
   if (tft.getTouch(&localTouchX, &localTouchY) && (localTouchX >= 0 && localTouchX < TFT_HOR_RES &&
                                                    localTouchY >= 0 && localTouchY < TFT_VER_RES))
   { // Touching in bounds
@@ -197,7 +216,7 @@ void handleTouch()
     // Serial.print(" Y: ");
     // Serial.println(localTouchY);
 
-    // Drop inputs until we exceed TOUCH_INPUT_BUFFER, this prevents smearing from pen pressing on screen.
+    // Drop inputs until we exceed TOUCH_INPUT_BUFFER, this prevents smearing from pen applying pressure.
     if (++touch_count > TOUCH_INPUT_BUFFER)
     {
       if (touch_queue_lastwrite_position < TOUCH_INPUT_BUFFER)
@@ -228,13 +247,11 @@ void handleTouch()
     }
   }
   else
-  { // No longer touching, re-init to zero. Also drops last 10 inputs, preventing smearing.
+  { // No longer touching, re-init to zero. Also drops last 10 inputs to prevent smearing from pen removing pressure.
     touch_count = 0;
     memset(touch_queue_x, 0, sizeof(touch_queue_x));
     memset(touch_queue_y, 0, sizeof(touch_queue_y));
-    touchX = 0;
-    touchY = 0;
-    touchZ = millis();
+    lastTouchTime = millis();
     touchZ = 0;
   }
 }
@@ -242,16 +259,146 @@ void handleTouch()
 /** Draw to screen if within canvas context! */
 void handleCanvasDraw()
 {
-  if (active_screen == SCREEN_CANVAS && touchZ)
+  if (currentScreen == SCREEN_CANVAS && touchZ)
   {
-    drawBrushToFB(touchX, touchY, 3, currentDrawColorIndex);
+    switch (currentTool)
+    {
+    case TOOL_PENCIL:
+      break;
+      drawPixelToFB(touchX, touchY, currentDrawColorIndex);
+    case TOOL_BRUSH:
+      drawBrushToFB(touchX, touchY, 3, currentDrawColorIndex);
+      break;
+    case TOOL_FILL:
+      break;
+    case TOOL_NOISE:
+      break;
+    case TOOL_DITHER:
+      break;
+    case TOOL_STICKER:
+      break;
+    }
   }
 }
 
-/** Handle button logic based on what screen we are on. */
-void handleTouchButtonUpdate()
+void newHandleTouchButtonUpdate()
 {
-  if (active_screen == SCREEN_CANVAS_MENU)
+  switch (currentScreen)
+  {
+  case SCREEN_CANVAS:
+    // No buttons on canvas; do nothing.
+    break;
+  case SCREEN_CANVAS_MENU:
+    // Handle logic for action bar
+    for (uint8_t b = 0; b < 16; b++)
+    {
+      bool touching = touchZ && colorButton[b].button.contains(touchX, touchY);
+      colorButton[b].button.press(touching);
+      if (colorButton[b].button.justReleased())
+      {
+        // colorButton[b].button.setOutlineColor(TFT_WHITE);
+        colorButton[b].button.drawButton(false);
+      }
+
+      if (colorButton[b].button.justPressed())
+      {
+        // colorButton[b].setOutlineColor(draw_color_palette[b]);
+        colorButton[b].button.drawButton(true);
+        setDrawColor(b);
+        newDrawCanvasMenu();
+        // drawCanvasMenu(true, false, true, false, false);
+      }
+    }
+    for (uint8_t b = 0; b < ACTION_BUTTON_COUNT; b++)
+    {
+      bool touching = touchZ && actionButton[b].button.contains(touchX, touchY);
+      actionButton[b].button.press(touching);
+
+      if (actionButton[b].button.justReleased())
+      {
+        actionButton[b].button.drawButton();
+      }
+
+      if (actionButton[b].button.justPressed())
+      {
+        actionButton[b].button.drawButton(true);
+        switch (b)
+        {
+        case 0: // Menu
+          if (currentDropdown != DROPDOWN_MENU)
+          {
+            currentDropdown = DROPDOWN_MENU;
+          }
+          break;
+        case 1: // Tools, lacking in sophistication
+          if (currentDropdown != DROPDOWN_TOOLS)
+          {
+            currentDropdown = DROPDOWN_TOOLS;
+          }
+          break;
+        case 2: // Save
+          if (currentDropdown != DROPDOWN_SAVE)
+          {
+            currentDropdown = DROPDOWN_SAVE;
+          }
+          break;
+        case 3: // Load
+          if (currentDropdown != DROPDOWN_LOAD)
+          {
+            currentDropdown = DROPDOWN_LOAD;
+          }
+          break;
+        default:
+          break;
+        }
+        // Draw pressed dropdown.
+        newDrawCanvasMenu();
+      }
+    }
+    // Handle dropdown buttons logic.
+    switch (currentDropdown)
+    {
+    case DROPDOWN_NONE:
+      break;
+    case DROPDOWN_MENU:
+      break;
+    case DROPDOWN_TOOLS:
+      break;
+    case DROPDOWN_SAVE:
+      break;
+    case DROPDOWN_LOAD:
+      /*for (uint8_t b = 0; b < SLOT_DROPDOWN_BUTTON_COUNT; b++)
+      {
+        bool touching = touchZ && loadButton[b].contains(touchX, touchY);
+        loadButton[b].press(touching);
+
+        if (loadButton[b].justReleased())
+        {
+          loadButton[b].drawButton(); // draw normal
+          // drawCanvasMenu(true, false, true, false, false);
+          if (!touchZ)
+            loadImageFromSD(b);
+        }
+
+        if (loadButton[b].justPressed())
+        {
+          loadButton[b].drawButton(true); // draw invert
+          Serial.println("Load Button Pressed.");
+        }
+      }
+      if (!touchZ)
+      {
+        active_dropdown = DROPDOWN_NONE;
+        drawCanvasMenu(true, true, false, false, false);
+      }*/
+      break;
+    }
+  }
+}
+/** Handle button logic based on what screen we are on. */
+/*void handleTouchButtonUpdate()
+{
+  if (activeScreen == SCREEN_CANVAS_MENU)
   {
     for (uint8_t b = 0; b < 16; b++)
     {
@@ -260,13 +407,11 @@ void handleTouchButtonUpdate()
       if (colorButton[b].justReleased())
       {
         colorButton[b].drawButton(false);
-        Serial.println("Unpress.");
       }
 
       if (colorButton[b].justPressed())
       {
         colorButton[b].drawButton(true);
-        Serial.println("Press.");
         setDrawColor(b);
         drawCanvasMenu(true, false, true, false, false);
       }
@@ -286,42 +431,67 @@ void handleTouchButtonUpdate()
         actionButton[b].drawButton(true);
         switch (b)
         {
-        case 0: // Tools
-          // Implement cow tools, would be lacking in sophistication
+        case 0: // Menu
+          if (active_dropdown != DROPDOWN_MENU)
+          {
+            active_dropdown = DROPDOWN_MENU;
+          }
+          break;
+        case 1: // Tools, lacking in sophistication
           if (active_dropdown != DROPDOWN_TOOLS)
           {
             active_dropdown = DROPDOWN_TOOLS;
-            drawCanvasMenu(true, true, false, false, false);
           }
-          break;
-        case 1: // Send
-          // Implement send screen
           break;
         case 2: // Save
           if (active_dropdown != DROPDOWN_SAVE)
           {
             active_dropdown = DROPDOWN_SAVE;
-            drawCanvasMenu(true, true, false, false, false);
           }
-          break;
           break;
         case 3: // Load
           if (active_dropdown != DROPDOWN_LOAD)
           {
             active_dropdown = DROPDOWN_LOAD;
-            drawCanvasMenu(true, true, false, false, false);
           }
           break;
-          break;
         default:
+#ifdef FRIENDBOX_DEBUG_MODE
+          Serial.println("CRITICAL: active_dropdown is in an invalid state! Undefined behaviour is occuring!");
+#endif
           break;
         }
-        // setDrawColor(b);
+        drawCanvasMenu(true, true, false, false, false);
       }
     }
 
     switch (active_dropdown)
     {
+    case DROPDOWN_MENU:
+      for (uint8_t b = 0; b < TOOL_DROPDOWN_BUTTON_COUNT; b++)
+      {
+        bool touching = touchZ && menuButton[b].contains(touchX, touchY);
+        menuButton[b].press(touching);
+
+        if (menuButton[b].justReleased())
+        {
+          menuButton[b].drawButton();
+          Serial.println("Menu Button Released.");
+          if (!touchZ)
+          {
+            active_dropdown = DROPDOWN_NONE;
+            Serial.println("Menu Button Logical Release.");
+            drawCanvasMenu(true, true, false, false, false);
+          }
+        }
+
+        if (menuButton[b].justPressed())
+        {
+          menuButton[b].drawButton(true); // draw invert
+          Serial.println("Menu Button Pressed.");
+        }
+      }
+      break;
     case DROPDOWN_TOOLS:
       for (uint8_t b = 0; b < TOOL_DROPDOWN_BUTTON_COUNT; b++)
       {
@@ -334,10 +504,11 @@ void handleTouchButtonUpdate()
           if (!touchZ)
           {
             Serial.println("Tool Button Logical Release.");
-            active_tool = draw_tool_id_t(b);
+            activeTool = draw_tool_id_t(b);
+            active_dropdown = DROPDOWN_NONE;
             drawCanvasMenu(true, true, false, false, false);
           }
-          if (b != active_tool)
+          if (b != activeTool)
           {
             toolButton[b].drawButton(); // draw normal
           }
@@ -351,7 +522,7 @@ void handleTouchButtonUpdate()
       }
       break;
     case DROPDOWN_LOAD:
-      for (uint8_t b = 0; b < LOAD_DROPDOWN_BUTTON_COUNT; b++)
+      for (uint8_t b = 0; b < SLOT_DROPDOWN_BUTTON_COUNT; b++)
       {
         bool touching = touchZ && loadButton[b].contains(touchX, touchY);
         loadButton[b].press(touching);
@@ -377,7 +548,7 @@ void handleTouchButtonUpdate()
       }
       break;
     case DROPDOWN_SAVE:
-      for (uint8_t b = 0; b < SAVE_DROPDOWN_BUTTON_COUNT; b++)
+      for (uint8_t b = 0; b < SLOT_DROPDOWN_BUTTON_COUNT; b++)
       {
         bool touching = touchZ && saveButton[b].contains(touchX, touchY);
         saveButton[b].press(touching);
@@ -412,18 +583,15 @@ void handleTouchButtonUpdate()
       break;
     }
   }
-}
+}*/
 
 /** Handle pressing of hardware button, will implement as hall effect sensor later
  * recheckInput will register another logical press even if button is being held.
  */
 void handleMenuButton(bool recheckInput)
 {
-  /** Debouncing nonsense. */
   static unsigned long lastPress = 0;
-  /** Debouncing nonsense. */
   static unsigned int lastButtonState = 0;
-  /** Debouncing nonsense. */
   static bool alreadyPressed = false;
   if (digitalRead(HALL_SENSOR_PIN) == LOW) /*Button Pressed*/
   {
@@ -434,7 +602,8 @@ void handleMenuButton(bool recheckInput)
     if (((millis() >= (lastPress + DEBOUNCE_MILLISECONDS)) & !alreadyPressed) || recheckInput)
     {
       Serial.println("Logical Press");
-      drawCanvasMenu(true, false, false, false, false);
+      // drawCanvasMenu(true, false, false, false, false);
+      changeScreenContext(SCREEN_CANVAS_MENU);
       alreadyPressed = true;
     }
     else
@@ -449,13 +618,150 @@ void handleMenuButton(bool recheckInput)
       lastPress = 0;
       alreadyPressed = false;
       Serial.println("Logical Release.");
-      drawCanvasMenu(false, false, false, false, false);
+      // drawCanvasMenu(false, false, false, false, false);
+      changeScreenContext(SCREEN_CANVAS);
     }
   }
 }
 
+void initFriendbox()
+{
+}
+
+void changeScreenContext(screen_id_t targetScreen)
+{
+  switch (targetScreen)
+  {
+  case SCREEN_CANVAS:
+    Serial.println("Drawing New Context: SCREEN_CANVAS");
+    currentScreen = SCREEN_CANVAS;
+    cleanupUIOutOfContext();
+    break;
+  case SCREEN_CANVAS_MENU:
+    currentDropdown = DROPDOWN_NONE;
+    currentScreen = SCREEN_CANVAS_MENU;
+    newDrawCanvasMenu();
+    break;
+  default:
+#ifdef FRIENDBOX_DEBUG_MODE
+    Serial.println("CRITICAL: Invalid context for drawing canvas menu. Are states correct?");
+#endif
+  }
+}
+
+void newDrawCanvasMenu()
+{
+  Serial.println("Drawing New Context: SCREEN_CANVAS_MENU");
+  // Draw Action Bar if Color Doesn't Match or Not Drawn
+  if (actionButton[0].fillColor != draw_color_palette[currentDrawColorIndex] || !actionButton[0].isDrawn)
+  {
+    for (int col = 0; col < ACTION_BUTTON_COUNT; col++)
+    {
+      actionButton[col].fillColor = draw_color_palette[currentDrawColorIndex];
+      actionButton[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
+      actionButton[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
+      actionButton[col].button.drawButton();
+      actionButton[col].isDrawn = true;
+    }
+  }
+
+  // Draw Color Bar if not drawn.
+  if (!colorButton[0].isDrawn)
+    for (int col = 0; col < 16; col++)
+    {
+      colorButton[col].button.drawButton();
+      colorButton[col].isDrawn = true;
+    }
+
+  switch (currentDropdown)
+  {
+  case DROPDOWN_NONE:
+    break;
+  case DROPDOWN_MENU:
+    break;
+  case DROPDOWN_TOOLS:
+    break;
+  case DROPDOWN_SAVE:
+    break;
+  case DROPDOWN_LOAD:
+    for (int col = 0; col < SLOT_DROPDOWN_BUTTON_COUNT; col++)
+    {
+      loadButton[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
+      loadButton[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
+      loadButton[col].button.drawButton();
+      loadButton[col].isDrawn = true;
+    }
+    break;
+  }
+}
+
+/* Search all registered UI buttons, determine if they are in context, and if not, write over them with canvas.*/
+void cleanupUIOutOfContext()
+{
+  for (int i = uiButtons.size() - 1; i >= 0; i--)
+  {
+    if (currentScreen != uiButtons[i]->screenContext || currentDropdown != uiButtons[i]->dropdownContext)
+    {
+      drawFramebuffer(uiButtons[i]->x, uiButtons[i]->y, uiButtons[i]->w, uiButtons[i]->h);
+      uiButtons[i]->isDrawn = false;
+    }
+  }
+}
+
+/* Initialize canvas menu buttons.*/
+void initCanvasMenuButtons()
+{
+  // Init Action Buttons (Top)
+  for (int col = 0; col < ACTION_BUTTON_COUNT; col++)
+  {
+    actionButton[col].x = ACTION_BUTTON_X_POS(col);
+    actionButton[col].y = CANVAS_DRAW_MENU_TOP_BAR_DIST_FROM_TOP_PX;
+    actionButton[col].w = CANVAS_DRAW_MENU_TOP_BAR_ITEM_WIDTH_PX;
+    actionButton[col].h = CANVAS_DRAW_MENU_TOP_BAR_HEIGHT_PX;
+    actionButton[col].fillColor = (int)draw_color_palette[currentDrawColorIndex];
+    actionButton[col].screenContext = SCREEN_CANVAS_MENU;
+    actionButton[col].dropdownContext = DROPDOWN_NONE;
+    actionButton[col].button.initButtonUL(&tft, actionButton[col].x, actionButton[col].y, actionButton[col].w, actionButton[col].h, TFT_WHITE,
+                                          actionButton[col].fillColor, (int)draw_color_palette_text_color[currentDrawColorIndex],
+                                          actionButtonLabel[col], 3, 3);
+    // push back pointer instead of unique object
+    uiButtons.push_back(&actionButton[col]);
+  }
+
+  // Init Color Buttons (Bottom)
+  for (int col = 0; col < 16; col++)
+  {
+    colorButton[col].x = COLOR_BUTTON_X_POS(col);
+    colorButton[col].y = (tft.height() - (CANVAS_DRAW_MENU_BOTTOM_BAR_HEIGHT_PX + CANVAS_DRAW_MENU_BOTTOM_BAR_DIST_FROM_BOTTOM_PX));
+    colorButton[col].w = CANVAS_DRAW_MENU_BOTTOM_BAR_ITEM_WIDTH_PX;
+    colorButton[col].h = CANVAS_DRAW_MENU_BOTTOM_BAR_HEIGHT_PX;
+    colorButton[col].fillColor = (int)draw_color_palette[col];
+    colorButton[col].screenContext = SCREEN_CANVAS_MENU;
+    colorButton[col].dropdownContext = DROPDOWN_NONE;
+    colorButton[col].button.initButtonUL(&tft, colorButton[col].x, colorButton[col].y, colorButton[col].w, colorButton[col].h,
+                                         TFT_WHITE, colorButton[col].fillColor,
+                                         (int)draw_color_palette_text_color[currentDrawColorIndex], "", 1, 1);
+    uiButtons.push_back(&colorButton[col]);
+  }
+  // Init Load Buttons
+  for (int col = 0; col < SLOT_DROPDOWN_BUTTON_COUNT; col++)
+  {
+    loadButton[col].x = ACTION_BUTTON_X_POS(3);
+    loadButton[col].y = ((col + 1) * (CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX + CANVAS_DRAW_MENU_DROPDOWN_DIST_BETWEEN_ITEMS) + CANVAS_DRAW_MENU_TOP_BAR_DIST_FROM_TOP_PX + CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX);
+    loadButton[col].w = CANVAS_DRAW_MENU_TOP_BAR_ITEM_WIDTH_PX;
+    loadButton[col].h = CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX;
+    loadButton[col].fillColor = draw_color_palette[currentDrawColorIndex];
+    colorButton[col].fillColor = (int)draw_color_palette[col];
+    colorButton[col].screenContext = SCREEN_CANVAS_MENU;
+    colorButton[col].dropdownContext = DROPDOWN_LOAD;
+    loadButton[col].button.initButtonUL(&tft, loadButton[col].x, loadButton[col].y, loadButton[col].w, loadButton[col].h,
+                                        TFT_WHITE, (int)draw_color_palette[currentDrawColorIndex], (int)draw_color_palette_text_color[currentDrawColorIndex],
+                                        loadButtonLabel[col], 2, 2);
+    uiButtons.push_back(&loadButton[col]);
+  }
+}
 /** Draws the canvas menu and appropriate sub-menus. Reduce excess drawing by passing parameters to skip things that are already drawn or haven't changed. */
-void drawCanvasMenu(bool show, bool wipeScreen, bool skipColorDraw, bool skipActionDraw, bool skipDropdownDraw)
+/*void drawCanvasMenu(bool show, bool wipeScreen, bool skipColorDraw, bool skipActionDraw, bool skipDropdownDraw)
 {
   if (show)
   {
@@ -463,7 +769,7 @@ void drawCanvasMenu(bool show, bool wipeScreen, bool skipColorDraw, bool skipAct
     {
       updateDisplayWithFB();
     }
-    active_screen = SCREEN_CANVAS_MENU;
+    activeScreen = SCREEN_CANVAS_MENU;
 
     if (!skipActionDraw)
     {
@@ -473,7 +779,8 @@ void drawCanvasMenu(bool show, bool wipeScreen, bool skipColorDraw, bool skipAct
         actionButton[col].initButtonUL(&tft, ACTION_BUTTON_X_POS(col), CANVAS_DRAW_MENU_TOP_BAR_DIST_FROM_TOP_PX,
                                        CANVAS_DRAW_MENU_TOP_BAR_ITEM_WIDTH_PX, CANVAS_DRAW_MENU_TOP_BAR_HEIGHT_PX,
                                        TFT_WHITE, (int)draw_color_palette[currentDrawColorIndex], (int)draw_color_palette_text_color[currentDrawColorIndex], actionButtonLabel[col], 3, 3);
-        actionButton[col].drawButton();
+          actionButton[col].drawButton();
+
       }
     }
 
@@ -494,14 +801,24 @@ void drawCanvasMenu(bool show, bool wipeScreen, bool skipColorDraw, bool skipAct
       // Check to see which dropdown is active and draw accordingly.
       switch (active_dropdown)
       {
+      case DROPDOWN_MENU:
+        for (int col = 0; col < FBOX_DROPDOWN_BUTTON_COUNT; col++)
+        {
+          menuButton[col].initButtonUL(&tft, ACTION_BUTTON_X_POS(0),
+                                       ((col + 1) * (CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX + CANVAS_DRAW_MENU_DROPDOWN_DIST_BETWEEN_ITEMS) + CANVAS_DRAW_MENU_TOP_BAR_DIST_FROM_TOP_PX + CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX),
+                                       CANVAS_DRAW_MENU_TOP_BAR_ITEM_WIDTH_PX, CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX,
+                                       TFT_WHITE, (int)draw_color_palette[currentDrawColorIndex], (int)draw_color_palette_text_color[currentDrawColorIndex], menuButtonLabel[col], 2, 2);
+          menuButton[col].drawButton();
+        }
+        break;
       case DROPDOWN_TOOLS:
         for (int col = 0; col < TOOL_DROPDOWN_BUTTON_COUNT; col++)
         {
-          toolButton[col].initButtonUL(&tft, ACTION_BUTTON_X_POS(0),
+          toolButton[col].initButtonUL(&tft, ACTION_BUTTON_X_POS(1),
                                        ((col + 1) * (CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX + CANVAS_DRAW_MENU_DROPDOWN_DIST_BETWEEN_ITEMS) + CANVAS_DRAW_MENU_TOP_BAR_DIST_FROM_TOP_PX + CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX),
                                        CANVAS_DRAW_MENU_TOP_BAR_ITEM_WIDTH_PX, CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX,
                                        TFT_WHITE, (int)draw_color_palette[currentDrawColorIndex], (int)draw_color_palette_text_color[currentDrawColorIndex], toolButtonLabel[col], 2, 2);
-          if (col == active_tool)
+          if (col == activeTool)
           {
             toolButton[col].drawButton(true);
           }
@@ -512,18 +829,17 @@ void drawCanvasMenu(bool show, bool wipeScreen, bool skipColorDraw, bool skipAct
         }
 
         // Now, we'll check to see what the active tool is to draw it as selected and also any settings related to it.
-        switch (active_tool)
+        switch (activeTool)
         {
         case TOOL_PENCIL:
-          settingsButton.initButtonUL(&tft, ACTION_BUTTON_X_POS(1),
+          settingsButton.initButtonUL(&tft, ACTION_BUTTON_X_POS(2),
                                       ((1) * (CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX + CANVAS_DRAW_MENU_DROPDOWN_DIST_BETWEEN_ITEMS) + CANVAS_DRAW_MENU_TOP_BAR_DIST_FROM_TOP_PX + CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX),
                                       CANVAS_DRAW_MENU_TOP_BAR_ITEM_WIDTH_PX, CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX,
                                       TFT_WHITE, (int)draw_color_palette[currentDrawColorIndex], (int)draw_color_palette_text_color[currentDrawColorIndex], settingsButtonLabel, 2, 2);
           settingsButton.drawButton();
           break;
-          break;
         case TOOL_BRUSH:
-          settingsButton.initButtonUL(&tft, ACTION_BUTTON_X_POS(1),
+          settingsButton.initButtonUL(&tft, ACTION_BUTTON_X_POS(2),
                                       ((2) * (CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX + CANVAS_DRAW_MENU_DROPDOWN_DIST_BETWEEN_ITEMS) + CANVAS_DRAW_MENU_TOP_BAR_DIST_FROM_TOP_PX + CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX),
                                       CANVAS_DRAW_MENU_TOP_BAR_ITEM_WIDTH_PX, CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX,
                                       TFT_WHITE, (int)draw_color_palette[currentDrawColorIndex], (int)draw_color_palette_text_color[currentDrawColorIndex], settingsButtonLabel, 2, 2);
@@ -539,10 +855,8 @@ void drawCanvasMenu(bool show, bool wipeScreen, bool skipColorDraw, bool skipAct
           break;
         }
         break;
-      case DROPDOWN_SEND:
-        break;
       case DROPDOWN_SAVE:
-        for (int col = 0; col < SAVE_DROPDOWN_BUTTON_COUNT; col++)
+        for (int col = 0; col < SLOT_DROPDOWN_BUTTON_COUNT; col++)
         {
           saveButton[col].initButtonUL(&tft, ACTION_BUTTON_X_POS(2),
                                        ((col + 1) * (CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX + CANVAS_DRAW_MENU_DROPDOWN_DIST_BETWEEN_ITEMS) + CANVAS_DRAW_MENU_TOP_BAR_DIST_FROM_TOP_PX + CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX),
@@ -552,7 +866,7 @@ void drawCanvasMenu(bool show, bool wipeScreen, bool skipColorDraw, bool skipAct
         }
         break;
       case DROPDOWN_LOAD:
-        for (int col = 0; col < LOAD_DROPDOWN_BUTTON_COUNT; col++)
+        for (int col = 0; col < SLOT_DROPDOWN_BUTTON_COUNT; col++)
         {
           loadButton[col].initButtonUL(&tft, ACTION_BUTTON_X_POS(3),
                                        ((col + 1) * (CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX + CANVAS_DRAW_MENU_DROPDOWN_DIST_BETWEEN_ITEMS) + CANVAS_DRAW_MENU_TOP_BAR_DIST_FROM_TOP_PX + CANVAS_DRAW_MENU_TOP_BAR_ITEM_HEIGHT_PX),
@@ -575,11 +889,11 @@ void drawCanvasMenu(bool show, bool wipeScreen, bool skipColorDraw, bool skipAct
   else
   {
     // Not showing menu, so reset contexts and flush display.
-    active_screen = SCREEN_CANVAS;
+    activeScreen = SCREEN_CANVAS;
     active_dropdown = DROPDOWN_NONE;
     updateDisplayWithFB();
   }
-}
+}*/
 
 void initNetwork(const char *netSSID, const char *netPassword, const char *hostname)
 {
@@ -617,7 +931,8 @@ void initSD(bool forceFormat)
     tft.setCursor(0, 5);
     tft.println("FATAL: SD mount failed.");
     tft.print("Re-attempting.");
-    while (!SD.begin(SD_CS, sdspi)) {
+    while (!SD.begin(SD_CS, sdspi))
+    {
       tft.print(".");
       delay(1000);
     }
@@ -728,12 +1043,6 @@ void initTouch(bool forceCalibrate)
   tft.setTouchCalibrate(calibration_data);
 }
 
-void initSound() {
-  Serial.println("playing sound");
-  File startup_sound_file = SD.open("/pumpkin.wav", FILE_READ);
-  startup_sound_file.read(soundbuffer, 8192);
-  startup_sound_file.close();
-}
 void drawPixelToFB(int x, int y, uint8_t colorIndex)
 {
   if (x < 0 || x >= tft.width() || y < 0 || y >= tft.height())
@@ -770,15 +1079,6 @@ void setBackgroundColor(uint8_t colorIndex)
   }
 }
 
-void setBrushRadius(int radius)
-{
-  if (radius > 0 && radius <= 50)
-  {
-    Serial.print("Brush radius set to: ");
-    Serial.println(radius);
-  }
-}
-
 /** Draw a circle brush at x,y with given radius and color - Updates BOTH framebuffer and screen in real-time! */
 void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex)
 {
@@ -806,19 +1106,6 @@ void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex)
   }
 }
 
-void drawToolToFB(int radius, draw_tool_id_t tool, uint8_t colorIndex)
-{
-
-  switch (tool)
-  {
-  case TOOL_BRUSH:
-    break;
-  default:
-    Serial.println("WARN: Trying to draw with an invalid / not implemented tool.");
-    break;
-  }
-}
-
 void drawTest4()
 {
   for (int y = 0; y < tft.height(); y++)
@@ -840,11 +1127,17 @@ void drawClearScreen()
       drawPixelToFB(x, y, 0);
     }
   }
-  updateDisplayWithFB();
+  // updateDisplayWithFB();
+  drawFramebuffer();
 }
 
 void saveImageToSD(int slot)
 {
+  if ((slot + 1) > SLOT_DROPDOWN_BUTTON_COUNT || slot < 0)
+  {
+    tft.print("That's not a valid save slot.");
+    return;
+  }
   char filename[20];
   snprintf(filename, sizeof(filename), "/slot%d.bin", slot);
   File f = SD.open(filename, FILE_WRITE);
@@ -852,17 +1145,26 @@ void saveImageToSD(int slot)
   {
     f.write(canvas_framebuffer, (tft.width() * tft.height()) / 2);
     f.close();
+    currentSaveSlot = slot;
+    nvs.begin("Friendbox", false);
+    nvs.putUInt("lastActiveSlot", currentSaveSlot);
+    nvs.end();
 #ifdef FRIENDBOX_DEBUG_MODE
     Serial.print("Saved image to save slot ");
     Serial.print(slot);
     Serial.println("!");
-    lastActiveSlot = slot;
 #endif
   }
 }
 
 void loadImageFromSD(int slot)
 {
+  if ((slot + 1) > SLOT_DROPDOWN_BUTTON_COUNT || slot < 0)
+  {
+    tft.print(slot);
+    tft.println(" is not a valid save slot.");
+    return;
+  }
   char filename[20];
   snprintf(filename, sizeof(filename), "/slot%d.bin", slot);
 
@@ -871,27 +1173,61 @@ void loadImageFromSD(int slot)
   {
     f.read(canvas_framebuffer, (tft.width() * tft.height()) / 2);
     f.close();
-    updateDisplayWithFB();
+    drawFramebuffer();
+    currentSaveSlot = slot;
+    nvs.begin("Friendbox", false);
+    nvs.putUInt("lastActiveSlot", currentSaveSlot);
+    nvs.end();
 #ifdef FRIENDBOX_DEBUG_MODE
     Serial.print("Loaded image from save slot ");
     Serial.print(slot);
     Serial.println("!");
-    lastActiveSlot = slot;
 #endif
   }
 }
 
-/** Wipe entire screen and replace with contents of the 4-bit color framebuffer. */
-void updateDisplayWithFB()
+// Replace specified areas with corresponding contents of the framebuffer. Passing no parameters, this will be the entire screen.
+void drawFramebuffer(int x, int y, int w, int h)
 {
-  tft.startWrite();
-  tft.setAddrWindow(0, 0, tft.width(), tft.height());
+  int x1 = max(0, x);
+  int y1 = max(0, y);
+  int x2 = min((int)tft.width(), x + w);
+  int y2 = min((int)tft.height(), y + h);
 
-  for (int i = 0; i < (tft.width() * tft.height()) / 2; i++)
+  int width = x2 - x1;
+  int height = y2 - y1;
+
+  if (width <= 0 || height <= 0)
+    return;
+
+  static uint16_t lineBuffer[TFT_HOR_RES];
+
+  tft.startWrite();
+  tft.setAddrWindow(x1, y1, width, height);
+
+  for (int py = y1; py < y2; py++)
   {
-    uint8_t b = canvas_framebuffer[i];
-    tft.pushColor(draw_color_palette[b >> 4]);
-    tft.pushColor(draw_color_palette[b & 0x0F]);
+    for (int px = x1; px < x2; px++)
+    {
+      int pixelIndex = py * tft.width() + px;
+      int byteIndex = pixelIndex >> 1;
+      uint8_t byte = canvas_framebuffer[byteIndex];
+      uint8_t colorIndex;
+
+      if (pixelIndex & 1)
+      {
+        colorIndex = byte & 0x0F;
+      }
+      else
+      {
+        colorIndex = (byte >> 4) & 0x0F;
+      }
+
+      lineBuffer[px - x1] = draw_color_palette[colorIndex];
+    }
+
+    // Try the version with swap parameter
+    tft.writePixelsDMA(lineBuffer, width, true); // false = don't swap bytes
   }
 
   tft.endWrite();
@@ -904,19 +1240,20 @@ void setup()
   initDisplay();
   initSD(false);
   initTouch(false);
-  //initSound();
   // initNetwork(NETWORK_SSID, NETWORK_PASS, LOCAL_HOSTNAME);
   // pinMode(MENU_BUTTON_PIN, INPUT);
   pinMode(HALL_SENSOR_PIN, INPUT_PULLUP);
-  loadImageFromSD(lastActiveSlot);
+  initCanvasMenuButtons();
+  nvs.begin("Friendbox", true);
+  loadImageFromSD(nvs.getUInt("lastActiveSlot", 8));
+  nvs.end();
 }
 
 void loop()
 {
   handleTouch();
   handleCanvasDraw();
-  handleTouchButtonUpdate();
+  newHandleTouchButtonUpdate();
   // We just gotta run this on loop until we can set up interrupts.
   handleMenuButton(false);
-  //audio.write(soundbuffer, 8192);
 }
