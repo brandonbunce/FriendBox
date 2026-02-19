@@ -728,7 +728,6 @@ void drawScreenSend()
       SCREEN_SEND_NAVI_BUTTON[col].isDrawn = true;
     }
   }
-  friendNames.end();
 }
 
 void drawSystemMessage()
