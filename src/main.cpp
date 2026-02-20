@@ -4,6 +4,7 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <LovyanGFX.h>
+#include <AceRoutine.h>
 #include <LGFX_ESP32_ST7796S_XPT2046.hpp>
 #include <SPI.h>
 #include <SD.h>
@@ -88,7 +89,8 @@ struct UIButton
   int fillColor;
 };
 
-struct Friend {
+struct Friend
+{
   String name;
   int userID;
 };
@@ -102,7 +104,7 @@ static screen_id_t currentScreen;
 static dropdown_id_t currentDropdown = DROPDOWN_NONE;
 
 /** Defines color palette for our 4-bit color frame buffer.
- * 
+ *
  * @param 0 Black
  * @param 1 Gray
  * @param 2 White
@@ -119,7 +121,7 @@ static dropdown_id_t currentDropdown = DROPDOWN_NONE;
  * @param 13 Sea Blue
  * @param 14 Sky Blue
  * @param 15 Cloud Blue
- * 
+ *
  * Color palette is from https://androidarts.com/palette/16pal.htm
  */
 uint16_t draw_color_palette[16] = {
@@ -238,6 +240,14 @@ static const char *SCREEN_SEND_NAVI_BUTTON_LABEL[SCREEN_SEND_NAVI_BUTTON_COUNT] 
 #define LOCAL_HOSTNAME "friendbox"
 HTTPClient http;
 
+struct UIList
+{
+  std::vector<std::string> listItems;
+  int page;
+};
+
+UIList friendListUI;
+
 // Storage
 Preferences nvs; // https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/storage/nvs_flash.html
 SPIClass sdspi = SPIClass(HSPI);
@@ -258,8 +268,9 @@ void drawDitherToFB(int x, int y, int radius, uint8_t colorIndex);
 void initScreenCanvasMenuButtons();
 void drawScreenCanvasMenu();
 void initScreenSendButtons();
-void drawScreenSend();
+void drawScreenSend(int page = 0);
 void drawClearScreen();
+void drawFriendboxLoadingScreen(const char *subtitle);
 void saveImageToSD(int slot);
 void loadImageFromSD(int slot);
 void drawFramebuffer(int x = 0, int y = 0, int w = TFT_HOR_RES, int h = TFT_VER_RES);
@@ -496,7 +507,9 @@ void handleTouchUIUpdate()
             changeScreenContext(SCREEN_SEND);
             return;
             break;
-          case 2:          // Reboot
+          case 2: // Reboot
+            drawFriendboxLoadingScreen("Rebooting...");
+            delay(500);    // Wait a moment to let user see the message before rebooting.
             esp_restart(); // obviously
             break;
           }
@@ -538,27 +551,67 @@ void handleTouchUIUpdate()
     // Handle logic for send screen.
     for (uint8_t b = 0; b < SCREEN_SEND_NAVI_BUTTON_COUNT; b++)
     {
-      if (handleUIButtonPress(&SCREEN_SEND_NAVI_BUTTON[b], ACT_ON_PRESS))
+      switch (b)
       {
-        switch (b)
+      case 0: // Canvas
+        if (handleUIButtonPress(&SCREEN_SEND_NAVI_BUTTON[b], ACT_ON_PRESS))
         {
-        case 0: // Canvas
           changeScreenContext(SCREEN_CANVAS_MENU);
-          break;
-        default:
-          // Not implemented yet.
-          break;
         }
-        // Draw pressed dropdown.
-        // drawScreenCanvasMenu();
+        break;
+      case 1: // Refresh
+        if (handleUIButtonPress(&SCREEN_SEND_NAVI_BUTTON[b], ACT_ON_PRESS))
+        {
+          drawScreenSend(friendListUI.page);
+        }
+        break;
+      case 2: // Sort
+              // Not implemented yet.
+      case 3: // Up
+        if (friendListUI.page > 0)
+        {
+          if (handleUIButtonPress(&SCREEN_SEND_NAVI_BUTTON[b], ACT_ON_PRESS))
+          {
+            drawScreenSend(friendListUI.page - 1);
+          }
+        }
+        break;
+      case 4: // Down
+        if ((friendListUI.page + 1) * SCREEN_SEND_ADDRESSBOOK_BUTTON_COUNT < friendListUI.listItems.size())
+        {
+          if (handleUIButtonPress(&SCREEN_SEND_NAVI_BUTTON[b], ACT_ON_PRESS))
+          {
+            drawScreenSend(friendListUI.page + 1);
+          }
+        }
+        break;
+      default:
+        // Not implemented yet.
+        break;
       }
+      // Draw pressed dropdown.
+      // drawScreenCanvasMenu();
     }
+
     for (uint8_t b = 0; b < SCREEN_SEND_ADDRESSBOOK_BUTTON_COUNT; b++)
     {
       if (handleUIButtonPress(&SCREEN_SEND_ADDRESSBOOK_BUTTON[b], ACT_ON_PRESS))
       {
         switch (b)
         {
+        case 0:
+          drawFriendboxLoadingScreen("Sending...");
+          networkSendFramebuffer(b);
+          drawFramebuffer();
+          break;
+        case 1:
+          break;
+        case 2:
+          break;
+        case 3:
+          break;
+        case 4:
+          break;
         default:
           networkSendFramebuffer(b);
           break;
@@ -662,6 +715,19 @@ void changeScreenContext(screen_id_t targetScreen)
   }
 }
 
+/** Show loading screen while transitioning between tasks or working on a network task.
+ * @param subtitle Subtitle to show under loading text, can be used to give more context on what we're waiting for.
+ */
+void drawFriendboxLoadingScreen(const char *subtitle)
+{
+  tft.fillScreen(draw_color_palette[currentDrawColorIndex]);
+  tft.setTextColor(draw_color_palette_text_color[currentDrawColorIndex], draw_color_palette[currentDrawColorIndex]);
+  tft.setTextSize(5);
+  tft.drawCenterString("FriendBox", 240, 120);
+  tft.setTextSize(3);
+  tft.drawCenterString(subtitle, 240, 180);
+}
+
 /* Initialize canvas menu buttons.*/
 void initScreenSendButtons()
 {
@@ -678,7 +744,7 @@ void initScreenSendButtons()
     SCREEN_SEND_ADDRESSBOOK_BUTTON[col].button.initButtonUL(&tft, SCREEN_SEND_ADDRESSBOOK_BUTTON[col].x, SCREEN_SEND_ADDRESSBOOK_BUTTON[col].y,
                                                             SCREEN_SEND_ADDRESSBOOK_BUTTON[col].w, SCREEN_SEND_ADDRESSBOOK_BUTTON[col].h, TFT_WHITE,
                                                             SCREEN_SEND_ADDRESSBOOK_BUTTON[col].fillColor, (int)draw_color_palette_text_color[currentDrawColorIndex],
-                                                            "USELESS", 2, 2);
+                                                            "Working...", 2, 2);
     // push back pointer instead of unique object
     uiButtons.push_back(&SCREEN_SEND_ADDRESSBOOK_BUTTON[col]);
   }
@@ -702,32 +768,104 @@ void initScreenSendButtons()
   }
 }
 
-void drawScreenSend()
+/**
+ * Draw
+ * @param page Starting from zero, show which "page" of friends we're showing in the address book. Each page shows 5 friends, so page 0 shows friends 0-4, page 1 shows friends 5-9, etc.
+ */
+void drawScreenSend(int page)
 {
-  Serial.print("Drawing SCREEN_SEND.");
-  std::vector<std::string> friendNames = networkGetFriends();
-  if (!SCREEN_SEND_ADDRESSBOOK_BUTTON[0].isDrawn)
+  Serial.print("Drawing SCREEN_SEND on page ");
+  Serial.println(page);
+  friendListUI.listItems = networkGetFriends();
+  if (!SCREEN_SEND_ADDRESSBOOK_BUTTON[0].isDrawn || friendListUI.page != page)
   {
     for (int col = 0; col < SCREEN_SEND_ADDRESSBOOK_BUTTON_COUNT; col++)
     {
-      SCREEN_SEND_ADDRESSBOOK_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
-      SCREEN_SEND_ADDRESSBOOK_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
-      SCREEN_SEND_ADDRESSBOOK_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
-      SCREEN_SEND_ADDRESSBOOK_BUTTON[col].button.drawButton(false, friendNames[col].c_str());
-      SCREEN_SEND_ADDRESSBOOK_BUTTON[col].isDrawn = true;
+      // Always erase the button area
+      drawFramebuffer(SCREEN_SEND_ADDRESSBOOK_BUTTON[col].x,
+                      SCREEN_SEND_ADDRESSBOOK_BUTTON[col].y,
+                      SCREEN_SEND_ADDRESSBOOK_BUTTON[col].w,
+                      SCREEN_SEND_ADDRESSBOOK_BUTTON[col].h);
+
+      int friendIndex = col + (page * SCREEN_SEND_ADDRESSBOOK_BUTTON_COUNT);
+
+      // Check if we have a friend for this button
+      if (friendIndex < friendListUI.listItems.size())
+      {
+        // Draw the button with friend name
+        SCREEN_SEND_ADDRESSBOOK_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
+        SCREEN_SEND_ADDRESSBOOK_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
+        SCREEN_SEND_ADDRESSBOOK_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
+        SCREEN_SEND_ADDRESSBOOK_BUTTON[col].button.drawButton(false, friendListUI.listItems[friendIndex].c_str());
+        SCREEN_SEND_ADDRESSBOOK_BUTTON[col].isDrawn = true;
+      }
+      else
+      {
+        // No friend for this slot, leave erased
+        SCREEN_SEND_ADDRESSBOOK_BUTTON[col].isDrawn = false;
+      }
     }
   }
-  if (!SCREEN_SEND_NAVI_BUTTON[0].isDrawn)
+  if (!SCREEN_SEND_NAVI_BUTTON[0].isDrawn || friendListUI.page != page)
   {
     for (int col = 0; col < SCREEN_SEND_NAVI_BUTTON_COUNT; col++)
     {
-      SCREEN_SEND_NAVI_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
-      SCREEN_SEND_NAVI_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
-      SCREEN_SEND_NAVI_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
-      SCREEN_SEND_NAVI_BUTTON[col].button.drawButton();
-      SCREEN_SEND_NAVI_BUTTON[col].isDrawn = true;
+      switch (col)
+      {
+      case 0:
+      case 1:
+      case 2:
+        SCREEN_SEND_NAVI_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
+        SCREEN_SEND_NAVI_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
+        SCREEN_SEND_NAVI_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
+        SCREEN_SEND_NAVI_BUTTON[col].button.drawButton();
+        SCREEN_SEND_NAVI_BUTTON[col].isDrawn = true;
+        break;
+      case 3:
+        Serial.println("Drawing over previous up button.");
+        drawFramebuffer(SCREEN_SEND_NAVI_BUTTON[col].x,
+                        SCREEN_SEND_NAVI_BUTTON[col].y,
+                        SCREEN_SEND_NAVI_BUTTON[col].w,
+                        SCREEN_SEND_NAVI_BUTTON[col].h);
+        if (page > 0)
+        {
+          Serial.print("Drawing up buttons because page is ");
+          Serial.println(page);
+          SCREEN_SEND_NAVI_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
+          SCREEN_SEND_NAVI_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
+          SCREEN_SEND_NAVI_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
+          SCREEN_SEND_NAVI_BUTTON[col].button.drawButton();
+          SCREEN_SEND_NAVI_BUTTON[col].isDrawn = true;
+        }
+        else
+        {
+          SCREEN_SEND_NAVI_BUTTON[col].isDrawn = false;
+        }
+        break;
+      case 4:
+        drawFramebuffer(SCREEN_SEND_NAVI_BUTTON[col].x,
+                        SCREEN_SEND_NAVI_BUTTON[col].y,
+                        SCREEN_SEND_NAVI_BUTTON[col].w,
+                        SCREEN_SEND_NAVI_BUTTON[col].h);
+        if ((page + 1) * 5 < friendListUI.listItems.size())
+        {
+          SCREEN_SEND_NAVI_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
+          SCREEN_SEND_NAVI_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
+          SCREEN_SEND_NAVI_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
+          SCREEN_SEND_NAVI_BUTTON[col].button.drawButton();
+          SCREEN_SEND_NAVI_BUTTON[col].isDrawn = true;
+        }
+        else
+        {
+          SCREEN_SEND_NAVI_BUTTON[col].isDrawn = false;
+        }
+        break;
+      default:
+        break;
+      }
     }
   }
+  friendListUI.page = page;
 }
 
 void drawSystemMessage()
@@ -1006,7 +1144,7 @@ bool initSD(bool forceFormat)
   Serial.println("INFO: Initializing SD...");
 #endif
   sdspi.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-
+  sdspi.setFrequency(40000000); // 40 MHz, explicitly otherwise will take 80mhz speed of display bus and cause corruption (?)
   if (!SD.begin(SD_CS, sdspi))
   {
 #ifdef FRIENDBOX_DEBUG_MODE
@@ -1241,14 +1379,9 @@ void drawClearScreen()
   drawFramebuffer();
 }
 
-void saveImageToSD(int slot)
+void saveImageToSD(int slot) // not working rn!
 {
-  tft.fillScreen(draw_color_palette[currentDrawColorIndex]);
-  tft.setTextColor(draw_color_palette_text_color[currentDrawColorIndex], draw_color_palette[currentDrawColorIndex]);
-  tft.setTextSize(4);
-  tft.drawCenterString("FriendBox", 240, 120);
-  tft.setTextSize(3);
-  tft.drawCenterString("Saving...", 240, 180);
+  drawFriendboxLoadingScreen("Saving...");
   if ((slot + 1) > SLOT_DROPDOWN_BUTTON_COUNT || slot < 0)
   {
     tft.print("That's not a valid save slot.");
@@ -1265,6 +1398,8 @@ void saveImageToSD(int slot)
     nvs.begin("Friendbox", false);
     nvs.putUInt("lastActiveSlot", currentSaveSlot);
     nvs.end();
+    drawFriendboxLoadingScreen("Saved!");
+    delay(500);
     drawFramebuffer();
 #ifdef FRIENDBOX_DEBUG_MODE
     Serial.print("Saved image to save slot ");
@@ -1275,18 +1410,15 @@ void saveImageToSD(int slot)
   else
   {
     f.close();
-    Serial.println("Failure.");
+    drawFriendboxLoadingScreen("ERROR: SAVE FAILED!");
+    delay(1000);
+    drawFramebuffer();
   }
 }
 
 void loadImageFromSD(int slot)
 {
-  tft.fillScreen(draw_color_palette[currentDrawColorIndex]);
-  tft.setTextColor(draw_color_palette_text_color[currentDrawColorIndex], draw_color_palette[currentDrawColorIndex]);
-  tft.setTextSize(4);
-  tft.drawCenterString("FriendBox", 240, 120);
-  tft.setTextSize(3);
-  tft.drawCenterString("Loading...", 240, 180);
+  drawFriendboxLoadingScreen("Loading...");
   if ((slot + 1) > SLOT_DROPDOWN_BUTTON_COUNT || slot < 0)
   {
     tft.print(slot);
@@ -1314,8 +1446,7 @@ void loadImageFromSD(int slot)
   }
   else
   {
-    tft.setTextSize(2);
-    tft.drawCenterString("No sketch saved to that slot!", 240, 220);
+    drawFriendboxLoadingScreen("No Sketch Saved!");
     delay(500);
     drawFramebuffer();
 #ifdef FRIENDBOX_DEBUG_MODE
@@ -1417,16 +1548,23 @@ std::vector<std::string> networkGetFriends()
 
   if (httpCode == 200)
   {
-    Serial.println("Successfully retrieved friends list!");
+    // Store payload.
     String payload = http.getString();
+    http.end();
+#ifdef FRIENDBOX_DEBUG_MODE
+    Serial.println("Successfully retrieved friends list!");
     Serial.print("Payload:");
     Serial.println(payload);
+#endif
 
+    // Init json object.
     JsonDocument jsonDoc;
+    // Deserialize JSON payload into document.
     DeserializationError error = deserializeJson(jsonDoc, payload);
     if (error)
     {
       Serial.print("Failed to parse JSON: ");
+      // throw exception?
       Serial.println(error.c_str());
       return friendNames;
     }
@@ -1441,7 +1579,6 @@ std::vector<std::string> networkGetFriends()
       {
         if (v.is<const char *>())
         {
-          Serial.println(v.as<const char *>());
           friendNames.push_back(v.as<const char *>());
         }
       }
@@ -1451,15 +1588,16 @@ std::vector<std::string> networkGetFriends()
     else
     {
       Serial.println("Response is not a JSON array!");
+      return friendNames; // Return empty array.
+      // throw exception?
     }
   }
   else
   {
     Serial.printf("Error: %d\n", httpCode);
     Serial.printf("Error Payload: %s\n", http.errorToString(httpCode).c_str());
+    return friendNames; // Return empty array.
   }
-  friendNames.push_back("idgaf");
-  http.end();
   return friendNames;
 }
 
