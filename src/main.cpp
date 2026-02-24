@@ -4,7 +4,7 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <LovyanGFX.h>
-#include <AceRoutine.h>
+// #include <AceRoutine.h>
 #include <LGFX_ESP32_ST7796S_XPT2046.hpp>
 #include <SPI.h>
 #include <SD.h>
@@ -51,6 +51,7 @@ typedef enum
   SCREEN_CANVAS_MENU,
   SCREEN_CANVAS_SIZE_SELECT,
   SCREEN_SEND,
+  SCREEN_SYSTEM_MESSAGE,
   SCREEN_RECEIVED,
   SCREEN_WELCOME,
   SCREEN_STARTUP,
@@ -101,6 +102,7 @@ UIButton *lastPressedButton;
 
 static draw_tool_id_t currentTool = TOOL_BRUSH;
 static screen_id_t currentScreen;
+static screen_id_t lastScreen; // Used by drawFriendboxLoadingScreen to return to previous context after showing loading screen.
 static dropdown_id_t currentDropdown = DROPDOWN_NONE;
 
 /** Defines color palette for our 4-bit color frame buffer.
@@ -203,7 +205,7 @@ static uint8_t touch_queue_lastwrite_position = 0;
 #define ACTION_BUTTON_X_POS(col) (ACTION_BUTTON_SPACING + ((col) * (CANVAS_DRAW_MENU_TOP_BAR_ITEM_WIDTH_PX + ACTION_BUTTON_SPACING)))
 #define ACTION_BUTTON_COUNT 4
 UIButton SCREEN_CANVAS_MENU_ACTION_BUTTON[ACTION_BUTTON_COUNT];
-static const char *SCREEN_CANVAS_MENU_ACTION_BUTTON_LABEL[ACTION_BUTTON_COUNT] = {"MENU", "TOOLS", "SAVE", "LOAD"};
+static const char *SCREEN_CANVAS_MENU_ACTION_BUTTON_LABEL[ACTION_BUTTON_COUNT] = {"Menu", "Tools", "Save", "Load"};
 
 #define CANVAS_DRAW_MENU_BOTTOM_BAR_DIST_FROM_BOTTOM_PX 5
 #define CANVAS_DRAW_MENU_BOTTOM_BAR_HEIGHT_PX 25
@@ -216,17 +218,17 @@ UIButton SCREEN_CANVAS_MENU_COLOR_BUTTON[COLOR_BUTTON_COUNT];
 #define CANVAS_DRAW_MENU_DROPDOWN_DIST_BETWEEN_ITEMS 5
 #define TOOL_DROPDOWN_BUTTON_COUNT 6
 UIButton SCREEN_CANVAS_MENU_TOOL_BUTTON[TOOL_DROPDOWN_BUTTON_COUNT];
-static const char *SCREEN_CANVAS_MENU_TOOL_BUTTON_LABEL[TOOL_DROPDOWN_BUTTON_COUNT] = {"PENCIL", "BRUSH", "FILL", "RAINBOW", "DITHER", "PATTERN"};
+static const char *SCREEN_CANVAS_MENU_TOOL_BUTTON_LABEL[TOOL_DROPDOWN_BUTTON_COUNT] = {"Pencil", "Brush", "Fill", "Rainbow", "Dither", "Pattern"};
 UIButton SCREEN_CANVAS_MENU_SETTINGS_BUTTON;
-static const char *SCREEN_CANVAS_MENU_SETTINGS_BUTTON_LABEL = "SET SIZE";
-#define MENU_DROPDOWN_BUTTON_COUNT 3
+static const char *SCREEN_CANVAS_MENU_SETTINGS_BUTTON_LABEL = "Set Size";
+#define MENU_DROPDOWN_BUTTON_COUNT 4
 UIButton SCREEN_CANVAS_MENU_MENU_BUTTON[MENU_DROPDOWN_BUTTON_COUNT];
-static const char *SCREEN_CANVAS_MENU_MENU_BUTTON_LABEL[MENU_DROPDOWN_BUTTON_COUNT] = {"GO HOME", "SEND", "REBOOT"};
+static const char *SCREEN_CANVAS_MENU_MENU_BUTTON_LABEL[MENU_DROPDOWN_BUTTON_COUNT] = {"Home", "Send", "Restart", "Network"};
 #define SLOT_DROPDOWN_BUTTON_COUNT 7
 UIButton SCREEN_CANVAS_MENU_SAVE_BUTTON[SLOT_DROPDOWN_BUTTON_COUNT];
-static const char *SCREEN_CANVAS_MENU_SAVE_BUTTON_LABEL[SLOT_DROPDOWN_BUTTON_COUNT] = {"SLOT 1", "SLOT 2", "SLOT 3", "SLOT 4", "SLOT 5", "SLOT 6", "SLOT 7"};
+static const char *SCREEN_CANVAS_MENU_SAVE_BUTTON_LABEL[SLOT_DROPDOWN_BUTTON_COUNT] = {"Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5", "Slot 6", "Slot 7"};
 UIButton SCREEN_CANVAS_MENU_LOAD_BUTTON[SLOT_DROPDOWN_BUTTON_COUNT];
-static const char *SCREEN_CANVAS_MENU_LOAD_BUTTON_LABEL[SLOT_DROPDOWN_BUTTON_COUNT] = {"SLOT 1", "SLOT 2", "SLOT 3", "SLOT 4", "SLOT 5", "SLOT 6", "SLOT 7"};
+static const char *SCREEN_CANVAS_MENU_LOAD_BUTTON_LABEL[SLOT_DROPDOWN_BUTTON_COUNT] = {"Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5", "Slot 6", "Slot 7"};
 
 /* SCREEN_SEND */
 #define SCREEN_SEND_ADDRESSBOOK_BUTTON_COUNT 5
@@ -270,14 +272,16 @@ void drawScreenCanvasMenu();
 void initScreenSendButtons();
 void drawScreenSend(int page = 0);
 void drawClearScreen();
-void drawFriendboxLoadingScreen(const char *subtitle);
+void drawFriendboxLoadingScreen(const char *subtitle, int holdTimeMs = 0);
 void saveImageToSD(int slot);
 void loadImageFromSD(int slot);
 void drawFramebuffer(int x = 0, int y = 0, int w = TFT_HOR_RES, int h = TFT_VER_RES);
 void networkSendFramebuffer(int userID);
 void networkReceiveFramebuffer();
+bool networkSendCanvas();
 std::vector<std::string> networkGetFriends();
 void cleanupUIOutOfContext(bool destroyElement = false);
+bool checkIfUIIsInitialized(screen_id_t targetScreen);
 void changeScreenContext(screen_id_t targetScreen);
 void drawTest4();
 bool handleUIButtonPress(UIButton *targetButton, ui_button_mode_id_t buttonMode = ACT_ON_PRESS);
@@ -508,8 +512,7 @@ void handleTouchUIUpdate()
             return;
             break;
           case 2: // Reboot
-            drawFriendboxLoadingScreen("Rebooting...");
-            delay(500);    // Wait a moment to let user see the message before rebooting.
+            drawFriendboxLoadingScreen("Rebooting...", 500);
             esp_restart(); // obviously
             break;
           }
@@ -530,7 +533,9 @@ void handleTouchUIUpdate()
       {
         if (handleUIButtonPress(&SCREEN_CANVAS_MENU_SAVE_BUTTON[b], ACT_ON_HOVER_AND_RELEASE))
         {
+          changeScreenContext(SCREEN_CANVAS);
           saveImageToSD(b);
+          changeScreenContext(SCREEN_CANVAS_MENU);
         }
       }
       break;
@@ -600,9 +605,19 @@ void handleTouchUIUpdate()
         switch (b)
         {
         case 0:
-          drawFriendboxLoadingScreen("Sending...");
-          networkSendFramebuffer(b);
+          drawFriendboxLoadingScreen("Sending...", 0);
+          if (networkSendCanvas())
+          {
+            drawFriendboxLoadingScreen("Sent!", 500);
+            delay(500);
+          }
+          else
+          {
+            drawFriendboxLoadingScreen("Failed to send.", 1000);
+            delay(500);
+          }
           drawFramebuffer();
+          changeScreenContext(SCREEN_SEND);
           break;
         case 1:
           break;
@@ -643,7 +658,6 @@ void handleMenuButton(bool recheckInput)
       if (((millis() >= (lastPress + DEBOUNCE_MILLISECONDS)) & !alreadyPressed) || recheckInput)
       {
         Serial.println("Logical Press");
-        // drawCanvasMenu(true, false, false, false, false);
         changeScreenContext(SCREEN_CANVAS_MENU);
         alreadyPressed = true;
       }
@@ -659,7 +673,6 @@ void handleMenuButton(bool recheckInput)
         lastPress = 0;
         alreadyPressed = false;
         Serial.println("Logical Release.");
-        // drawCanvasMenu(false, false, false, false, false);
         if (currentScreen != SCREEN_CANVAS)
           changeScreenContext(SCREEN_CANVAS);
       }
@@ -667,12 +680,60 @@ void handleMenuButton(bool recheckInput)
   }
 }
 
+std::string getUIContextName(screen_id_t screenContext)
+{
+  switch (screenContext)
+  {
+  case SCREEN_CANVAS:
+    return "SCREEN_CANVAS";
+  case SCREEN_CANVAS_MENU:
+    return "SCREEN_CANVAS_MENU";
+  case SCREEN_CANVAS_SIZE_SELECT:
+    return "SCREEN_CANVAS_SIZE_SELECT";
+  case SCREEN_SEND:
+    return "SCREEN_SEND";
+  case SCREEN_SYSTEM_MESSAGE:
+    return "SCREEN_SYSTEM_MESSAGE";
+  case SCREEN_RECEIVED:
+    return "SCREEN_RECEIVED";
+  case SCREEN_WELCOME:
+    return "SCREEN_WELCOME";
+  case SCREEN_STARTUP:
+    return "SCREEN_STARTUP";
+  case SCREEN_NETWORK_SETTINGS:
+    return "SCREEN_NETWORK_SETTINGS";
+  default:
+    return "UNKNOWN_SCREEN";
+  }
+}
+
+std::string getUISubcontextName(dropdown_id_t subcontext)
+{
+  switch (subcontext)
+  {
+  case DROPDOWN_NONE:
+    return "DROPDOWN_NONE";
+  case DROPDOWN_MENU:
+    return "DROPDOWN_MENU";
+  case DROPDOWN_TOOLS:
+    return "DROPDOWN_TOOLS";
+  case DROPDOWN_SAVE:
+    return "DROPDOWN_SAVE";
+  case DROPDOWN_LOAD:
+    return "DROPDOWN_LOAD";
+  default:
+    return "UNKNOWN_DROPDOWN";
+  }
+}
+
 void changeScreenContext(screen_id_t targetScreen)
 {
+  Serial.print("Switching Context: ");
+  Serial.print(getUIContextName(currentScreen).c_str());
   switch (targetScreen)
   {
   case SCREEN_CANVAS:
-    Serial.println("Drawing New Context: SCREEN_CANVAS");
+    Serial.println(" --> SCREEN_CANVAS");
     if (currentScreen != SCREEN_CANVAS_MENU && currentScreen != SCREEN_CANVAS)
     {
       Serial.println("Deleting from context.");
@@ -686,19 +747,23 @@ void changeScreenContext(screen_id_t targetScreen)
     }
     break;
   case SCREEN_CANVAS_MENU:
-    Serial.println("Drawing New Context: SCREEN_CANVAS_MENU");
-    if (currentScreen != SCREEN_CANVAS)
+    Serial.println(" --> SCREEN_CANVAS_MENU");
+    if (currentScreen == SCREEN_CANVAS || currentScreen == SCREEN_CANVAS_MENU)
     {
+      currentDropdown = DROPDOWN_NONE;
+      currentScreen = SCREEN_CANVAS_MENU;
+    }
+    else
+    {
+      currentDropdown = DROPDOWN_NONE;
       currentScreen = SCREEN_CANVAS_MENU;
       cleanupUIOutOfContext(true);
-      initScreenCanvasMenuButtons();
     }
-    currentDropdown = DROPDOWN_NONE;
-    currentScreen = SCREEN_CANVAS_MENU;
+    initScreenCanvasMenuButtons();
     drawScreenCanvasMenu();
     break;
   case SCREEN_SEND:
-    Serial.println("Drawing New Context: SCREEN_SEND");
+    Serial.println(" --> SCREEN_SEND");
     if (currentScreen != SCREEN_SEND)
     {
       currentScreen = SCREEN_SEND;
@@ -708,29 +773,50 @@ void changeScreenContext(screen_id_t targetScreen)
     currentScreen = SCREEN_SEND;
     drawScreenSend();
     break;
+  case SCREEN_SYSTEM_MESSAGE: // Call this when showing message.
+    Serial.println(" --> SCREEN_SYSTEM_MESSAGE");
+    currentScreen = SCREEN_SYSTEM_MESSAGE;
+    cleanupUIOutOfContext(false);
+    break;
   default:
+
 #ifdef FRIENDBOX_DEBUG_MODE
     Serial.println("CRITICAL: Invalid context for drawing canvas menu. Are states correct?");
 #endif
   }
 }
 
-/** Show loading screen while transitioning between tasks or working on a network task.
+/** Switch context to loading screen and show while waiting for operations or network activity.
  * @param subtitle Subtitle to show under loading text, can be used to give more context on what we're waiting for.
+ * @param holdTimeMs How long should we hold before returning?
  */
-void drawFriendboxLoadingScreen(const char *subtitle)
+void drawFriendboxLoadingScreen(const char *subtitle, int holdTimeMs)
 {
+  lastScreen = currentScreen;                 // Store last screen to return to after showing loading screen.
+  changeScreenContext(SCREEN_SYSTEM_MESSAGE); // Change context to system message for loading screen.
   tft.fillScreen(draw_color_palette[currentDrawColorIndex]);
   tft.setTextColor(draw_color_palette_text_color[currentDrawColorIndex], draw_color_palette[currentDrawColorIndex]);
   tft.setTextSize(5);
   tft.drawCenterString("FriendBox", 240, 120);
   tft.setTextSize(3);
   tft.drawCenterString(subtitle, 240, 180);
+  delay(holdTimeMs);               // Wait a moment if specified.
+  changeScreenContext(lastScreen); // Return to previous context after showing loading screen.
 }
 
 /* Initialize canvas menu buttons.*/
 void initScreenSendButtons()
 {
+  // First check if we need to init elements.
+  if (checkIfUIIsInitialized(SCREEN_SEND))
+  {
+    Serial.println("UI already initialized for SCREEN_SEND, skipping initialization.");
+    return;
+  }
+  else
+  {
+    Serial.println("UI not initialized for SCREEN_SEND, initializing...");
+  }
   // Init Address Buttons
   for (int col = 0; col < SCREEN_SEND_ADDRESSBOOK_BUTTON_COUNT; col++)
   {
@@ -868,113 +954,19 @@ void drawScreenSend(int page)
   friendListUI.page = page;
 }
 
-void drawSystemMessage()
-{
-}
-
-void drawScreenCanvasMenu()
-{
-  Serial.println("drawing canvas menu.");
-  // Draw Action Bar if Color Doesn't Match or Not Drawn
-  if (SCREEN_CANVAS_MENU_ACTION_BUTTON[0].fillColor != draw_color_palette[currentDrawColorIndex] || !SCREEN_CANVAS_MENU_ACTION_BUTTON[0].isDrawn)
-  {
-    for (int col = 0; col < ACTION_BUTTON_COUNT; col++)
-    {
-      SCREEN_CANVAS_MENU_ACTION_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
-      SCREEN_CANVAS_MENU_ACTION_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
-      SCREEN_CANVAS_MENU_ACTION_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
-      SCREEN_CANVAS_MENU_ACTION_BUTTON[col].button.drawButton();
-      SCREEN_CANVAS_MENU_ACTION_BUTTON[col].isDrawn = true;
-    }
-  }
-
-  // Draw Color Bar if not drawn.
-  if (!SCREEN_CANVAS_MENU_COLOR_BUTTON[0].isDrawn)
-    for (int col = 0; col < 16; col++)
-    {
-      SCREEN_CANVAS_MENU_COLOR_BUTTON[col].button.drawButton();
-      SCREEN_CANVAS_MENU_COLOR_BUTTON[col].isDrawn = true;
-    }
-
-  switch (currentDropdown)
-  {
-  case DROPDOWN_NONE:
-    break;
-  case DROPDOWN_MENU:
-    for (int col = 0; col < MENU_DROPDOWN_BUTTON_COUNT; col++)
-    {
-      SCREEN_CANVAS_MENU_MENU_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
-      SCREEN_CANVAS_MENU_MENU_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
-      SCREEN_CANVAS_MENU_MENU_BUTTON[col].button.drawButton();
-      SCREEN_CANVAS_MENU_MENU_BUTTON[col].isDrawn = true;
-    }
-    break;
-  case DROPDOWN_TOOLS:
-    for (int col = 0; col < TOOL_DROPDOWN_BUTTON_COUNT; col++)
-    {
-      SCREEN_CANVAS_MENU_TOOL_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
-      SCREEN_CANVAS_MENU_TOOL_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
-      if (col == currentTool)
-      {
-        SCREEN_CANVAS_MENU_TOOL_BUTTON[col].button.drawButton(true);
-      }
-      else
-      {
-        SCREEN_CANVAS_MENU_TOOL_BUTTON[col].button.drawButton();
-      }
-      SCREEN_CANVAS_MENU_TOOL_BUTTON[col].isDrawn = true;
-    }
-    break;
-  case DROPDOWN_SAVE:
-    for (int col = 0; col < SLOT_DROPDOWN_BUTTON_COUNT; col++)
-    {
-      SCREEN_CANVAS_MENU_SAVE_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
-      SCREEN_CANVAS_MENU_SAVE_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
-      SCREEN_CANVAS_MENU_SAVE_BUTTON[col].button.drawButton();
-      SCREEN_CANVAS_MENU_SAVE_BUTTON[col].isDrawn = true;
-    }
-    break;
-  case DROPDOWN_LOAD:
-    for (int col = 0; col < SLOT_DROPDOWN_BUTTON_COUNT; col++)
-    {
-      SCREEN_CANVAS_MENU_LOAD_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
-      SCREEN_CANVAS_MENU_LOAD_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
-      SCREEN_CANVAS_MENU_LOAD_BUTTON[col].button.drawButton();
-      SCREEN_CANVAS_MENU_LOAD_BUTTON[col].isDrawn = true;
-    }
-    break;
-  }
-}
-
-/**
- * Search all registered UI buttons, determine if they are in context, and if not, write over them with canvas.
- * @param destroyElement Should we destroy the object instead of marking it as undrawn?
- */
-void cleanupUIOutOfContext(bool destroyElement)
-{
-  for (int i = uiButtons.size() - 1; i >= 0; i--)
-  {
-    if ((currentScreen != uiButtons[i]->screenContext || (currentDropdown != uiButtons[i]->dropdownContext && uiButtons[i]->dropdownContext != DROPDOWN_NONE)) && uiButtons[i]->isDrawn)
-    {
-      drawFramebuffer(uiButtons[i]->x, uiButtons[i]->y, uiButtons[i]->w, uiButtons[i]->h);
-      if (destroyElement)
-      {
-        Serial.println("Undrawing UI and Deleting from Context.");
-        uiButtons[i]->isDrawn = false;
-        uiButtons.erase(uiButtons.begin() + i);
-      }
-      else
-      {
-        // Serial.println("Undrawing UI.");
-        uiButtons[i]->isDrawn = false;
-      }
-    }
-  }
-}
-
-/* Initialize canvas menu buttons.*/
+/* Initialize canvas menu buttons if they don't already exist.*/
 void initScreenCanvasMenuButtons()
 {
+  // First check if we need to init elements.
+  if (checkIfUIIsInitialized(SCREEN_CANVAS_MENU))
+  {
+    Serial.println("UI already initialized for SCREEN_CANVAS_MENU, skipping initialization.");
+    return;
+  }
+  else
+  {
+    Serial.println("UI not initialized for SCREEN_CANVAS_MENU, initializing...");
+  }
   // Init Action Buttons (Top)
   for (int col = 0; col < ACTION_BUTTON_COUNT; col++)
   {
@@ -1069,13 +1061,141 @@ void initScreenCanvasMenuButtons()
   }
 }
 
+void drawScreenCanvasMenu()
+{
+  Serial.println("Drawing SCREEN_CANVAS_MENU");
+  // Draw Action Bar if Color Doesn't Match or Not Drawn
+  if (SCREEN_CANVAS_MENU_ACTION_BUTTON[0].fillColor != draw_color_palette[currentDrawColorIndex] || !SCREEN_CANVAS_MENU_ACTION_BUTTON[0].isDrawn)
+  {
+    for (int col = 0; col < ACTION_BUTTON_COUNT; col++)
+    {
+      SCREEN_CANVAS_MENU_ACTION_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
+      SCREEN_CANVAS_MENU_ACTION_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
+      SCREEN_CANVAS_MENU_ACTION_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
+      SCREEN_CANVAS_MENU_ACTION_BUTTON[col].button.drawButton();
+      SCREEN_CANVAS_MENU_ACTION_BUTTON[col].isDrawn = true;
+    }
+  }
+
+  // Draw Color Bar if not drawn.
+  if (!SCREEN_CANVAS_MENU_COLOR_BUTTON[0].isDrawn)
+    for (int col = 0; col < 16; col++)
+    {
+      SCREEN_CANVAS_MENU_COLOR_BUTTON[col].button.drawButton();
+      SCREEN_CANVAS_MENU_COLOR_BUTTON[col].isDrawn = true;
+    }
+
+  switch (currentDropdown)
+  {
+  case DROPDOWN_NONE:
+    break;
+  case DROPDOWN_MENU:
+    for (int col = 0; col < MENU_DROPDOWN_BUTTON_COUNT; col++)
+    {
+      SCREEN_CANVAS_MENU_MENU_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
+      SCREEN_CANVAS_MENU_MENU_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
+      SCREEN_CANVAS_MENU_MENU_BUTTON[col].button.drawButton();
+      SCREEN_CANVAS_MENU_MENU_BUTTON[col].isDrawn = true;
+    }
+    break;
+  case DROPDOWN_TOOLS:
+    for (int col = 0; col < TOOL_DROPDOWN_BUTTON_COUNT; col++)
+    {
+      SCREEN_CANVAS_MENU_TOOL_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
+      SCREEN_CANVAS_MENU_TOOL_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
+      if (col == currentTool)
+      {
+        SCREEN_CANVAS_MENU_TOOL_BUTTON[col].button.drawButton(true);
+      }
+      else
+      {
+        SCREEN_CANVAS_MENU_TOOL_BUTTON[col].button.drawButton();
+      }
+      SCREEN_CANVAS_MENU_TOOL_BUTTON[col].isDrawn = true;
+    }
+    break;
+  case DROPDOWN_SAVE:
+    for (int col = 0; col < SLOT_DROPDOWN_BUTTON_COUNT; col++)
+    {
+      SCREEN_CANVAS_MENU_SAVE_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
+      SCREEN_CANVAS_MENU_SAVE_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
+      SCREEN_CANVAS_MENU_SAVE_BUTTON[col].button.drawButton();
+      SCREEN_CANVAS_MENU_SAVE_BUTTON[col].isDrawn = true;
+    }
+    break;
+  case DROPDOWN_LOAD:
+    for (int col = 0; col < SLOT_DROPDOWN_BUTTON_COUNT; col++)
+    {
+      SCREEN_CANVAS_MENU_LOAD_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
+      SCREEN_CANVAS_MENU_LOAD_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
+      SCREEN_CANVAS_MENU_LOAD_BUTTON[col].button.drawButton();
+      SCREEN_CANVAS_MENU_LOAD_BUTTON[col].isDrawn = true;
+    }
+    break;
+  }
+}
+
+/** Loop through current UI elements to see if any exist belonging to the target context.
+ * @param targetScreen Which screen context are we checking for?
+ * @return bool True if we find an element in the target context, false if we loop through all elements without finding one.
+ */
+bool checkIfUIIsInitialized(screen_id_t targetScreen)
+{
+  for (int i = 0; i < uiButtons.size(); i++)
+  {
+    if (uiButtons[i]->screenContext == targetScreen)
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Search all registered UI buttons, determine if they are in context, and if not, write over them with canvas.
+ * @param removeFromContext On top of redrawing over element, should we also remove it from the UI elements vector?
+ */
+void cleanupUIOutOfContext(bool removeFromContext)
+{
+  //Serial.print("UI Elements in Context:");
+  //Serial.println(uiButtons.size());
+  for (int i = uiButtons.size() - 1; i >= 0; i--)
+  {
+    //Serial.print("CHECKING: ");
+    //Serial.print(getUIContextName(uiButtons[i]->screenContext).c_str());
+    //Serial.print(" - ");
+    //Serial.print(getUISubcontextName(uiButtons[i]->dropdownContext).c_str());
+
+    if (currentScreen != uiButtons[i]->screenContext ||
+         (currentDropdown != uiButtons[i]->dropdownContext && uiButtons[i]->dropdownContext != DROPDOWN_NONE))
+    {
+      // Overwrite drawn elements with canvas.
+      if (uiButtons[i]->isDrawn)
+      {
+        //Serial.print(" - DRAWING OVER");
+        drawFramebuffer(uiButtons[i]->x, uiButtons[i]->y, uiButtons[i]->w, uiButtons[i]->h);
+        uiButtons[i]->isDrawn = false;
+      }
+
+      // Remove from vector if specified, we're counting backwards to avoid issues with shifting indices.
+      if (removeFromContext)
+      {
+        //Serial.print(" AND REMOVING");
+        uiButtons[i]->isDrawn = false;
+        uiButtons.erase(uiButtons.begin() + i);
+      }
+    }
+    //Serial.println("");
+  }
+}
+
 void initFriendbox()
 {
   initDisplay();
   // Initial Display Presentation
   tft.fillScreen(draw_color_palette[currentDrawColorIndex]);
   tft.setTextColor(draw_color_palette_text_color[currentDrawColorIndex], draw_color_palette[currentDrawColorIndex]);
-  tft.setTextSize(4);
+  tft.setTextSize(5);
   tft.drawCenterString("FriendBox", 240, 20);
   tft.setTextSize(3);
   tft.drawCenterString(FRIENDBOX_SOFTWARE_VERSION, 240, 60);
@@ -1106,7 +1226,6 @@ void initFriendbox()
   {
     tft.println("Done!");
   }
-  initScreenCanvasMenuButtons();
   tft.print("Initializing NVS...");
   if (initNVS())
   {
@@ -1116,6 +1235,7 @@ void initFriendbox()
   nvs.begin("Friendbox", true);
   loadImageFromSD(nvs.getUInt("lastActiveSlot", 8));
   nvs.end();
+  changeScreenContext(SCREEN_CANVAS);
 }
 
 bool initNetwork(const char *netSSID, const char *netPassword, const char *hostname)
@@ -1379,9 +1499,9 @@ void drawClearScreen()
   drawFramebuffer();
 }
 
-void saveImageToSD(int slot) // not working rn!
+void saveImageToSD(int slot)
 {
-  drawFriendboxLoadingScreen("Saving...");
+  drawFriendboxLoadingScreen("Saving...", 0);
   if ((slot + 1) > SLOT_DROPDOWN_BUTTON_COUNT || slot < 0)
   {
     tft.print("That's not a valid save slot.");
@@ -1398,8 +1518,7 @@ void saveImageToSD(int slot) // not working rn!
     nvs.begin("Friendbox", false);
     nvs.putUInt("lastActiveSlot", currentSaveSlot);
     nvs.end();
-    drawFriendboxLoadingScreen("Saved!");
-    delay(500);
+    drawFriendboxLoadingScreen("Saved!", 250);
     drawFramebuffer();
 #ifdef FRIENDBOX_DEBUG_MODE
     Serial.print("Saved image to save slot ");
@@ -1410,15 +1529,14 @@ void saveImageToSD(int slot) // not working rn!
   else
   {
     f.close();
-    drawFriendboxLoadingScreen("ERROR: SAVE FAILED!");
-    delay(1000);
+    drawFriendboxLoadingScreen("ERROR: SAVE FAILED!", 1000);
     drawFramebuffer();
   }
 }
 
 void loadImageFromSD(int slot)
 {
-  drawFriendboxLoadingScreen("Loading...");
+  drawFriendboxLoadingScreen("Loading...", 0);
   if ((slot + 1) > SLOT_DROPDOWN_BUTTON_COUNT || slot < 0)
   {
     tft.print(slot);
@@ -1446,8 +1564,7 @@ void loadImageFromSD(int slot)
   }
   else
   {
-    drawFriendboxLoadingScreen("No Sketch Saved!");
-    delay(500);
+    drawFriendboxLoadingScreen("No Sketch Saved!", 500);
     drawFramebuffer();
 #ifdef FRIENDBOX_DEBUG_MODE
     Serial.print("Cant load slot ");
@@ -1531,6 +1648,35 @@ void networkSendFramebuffer(int userID)
   }
 
   http.end();
+}
+
+bool networkSendCanvas()
+{
+  HTTPClient http;
+
+  // Calculate size
+  size_t framebufferSize = (tft.width() * tft.height()) / 2; // 76,800 bytes
+
+  http.begin("http://192.168.1.8:8000/sketches/upload");
+  http.addHeader("Content-Type", "application/octet-stream");
+
+  // Send raw framebuffer data
+  int httpCode = http.POST(canvas_framebuffer, framebufferSize);
+
+  if (httpCode == 200)
+  {
+    String response = http.getString();
+    Serial.println("Sketch uploaded successfully!");
+    Serial.println(response);
+    http.end();
+    return true;
+  }
+  else
+  {
+    Serial.printf("Upload failed: %d\n", httpCode);
+    http.end();
+    return false;
+  }
 }
 
 void networkReceiveFramebuffer()
