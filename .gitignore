@@ -4,4 +4,3 @@
 .vscode/launch.json
 .vscode/ipch
 include/secrets.hpp
-!src/LGFX_ESP32_ST7796S_XPT2046.h
