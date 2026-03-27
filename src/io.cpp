@@ -1,21 +1,11 @@
-#include "io.h"
-#include "display.h"
-#include "canvas.h"
-#include "ui.h"
+#include "io.hpp"
+#include "display.hpp"
+#include "canvas.hpp"
+#include "ui.hpp"
 
 // Storage
 Preferences nvs; // https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/storage/nvs_flash.html
 SPIClass sdspi = SPIClass(HSPI);
-#define SD_CS 26
-#define SD_SCK 14
-#define SD_MISO 32
-#define SD_MOSI 13
-
-// Input (Buttons)
-/** Which GPIO pin will be used as input for the hall effect button? */
-#define HALL_SENSOR_PIN 27
-/** How long should button be pressed before logically registering input? */
-#define DEBOUNCE_MILLISECONDS 50
 
 bool initNVS()
 {
@@ -148,11 +138,6 @@ void loadImageFromSD(int slot)
     }
 }
 
-/**
- * Handle pressing of hardware button, will implement as hall effect sensor later
- * recheckInput will register another logical press even if button is being held.
- * @param recheckInput Should we register another input in the event the button is still being held?
- */
 void handleMenuButton(bool recheckInput)
 {
     if (currentScreen == SCREEN_CANVAS || currentScreen == SCREEN_CANVAS_MENU)

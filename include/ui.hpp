@@ -1,6 +1,6 @@
 // MUST REFACTOR THE LEGACY UI MONOLITH!!!
-#ifndef UI_H
-#define UI_H
+#ifndef UI_HPP
+#define UI_HPP
 
 #include <Arduino.h>
 #include <vector>
@@ -102,15 +102,40 @@ struct UIButton
 };
 
 // Functions
+/** Check if UI is already initialized for a given screen context. If it's not, initialize it.
+ * @param targetScreen The screen context we want to check for initialization and initialize if not already.
+ */
 void initUIForScreen(screen_id_t targetScreen);
 void drawScreenCanvasMenu();
+/**
+ * Draw
+ * @param page Starting from zero, show which "page" of friends we're showing in the address book. Each page shows 5 friends, so page 0 shows friends 0-4, page 1 shows friends 5-9, etc.
+ */
 void drawScreenSend(int page = 0);
 void drawScreenFileBrowser(int page = 0);
 bool drawSketchPreview(const char *filepath, int x, int y, int scaleDown, bool drawBorder = true);
+/** Switch context to loading screen and show while waiting for operations or network activity.
+ * @param subtitle Subtitle to show under loading text, can be used to give more context on what we're waiting for.
+ * @param holdTimeMs How long should we hold before returning?
+ * @param subsubtitle Self-explanatory.
+ * @param subsubsubtitle Self-explanatory.
+ */
 void drawFriendboxLoadingScreen(const char *subtitle, int holdTimeMs = 0, const char *subsubtitle = "", const char *subsubsubtitle = "");
+/**
+ * Search all registered UI buttons, determine if they are in context, and if not, write over them with canvas.
+ * @param removeFromContext On top of redrawing over element, should we also remove it from the UI elements vector?
+ */
 void cleanupUIOutOfContext(bool destroyElement = false);
+/** Loop through current UI elements to see if any exist belonging to the target context.
+ * @param targetScreen Which screen context are we checking for?
+ * @return bool True if we find an element in the target context, false if we loop through all elements without finding one.
+ */
 bool checkIfUIIsInitialized(screen_id_t targetScreen);
 void changeScreenContext(screen_id_t targetScreen);
+/** Run this to check the target button for inputs, and register a logical press when the button is pressed according to mode.
+ * @param targetButton The button we are checking for input on.
+ * @param buttonMode The mode we are checking for input in, this determines when we register a logical press.
+ */
 bool handleUIButtonPress(UIButton *targetButton, ui_button_mode_id_t buttonMode = ACT_ON_PRESS);
 void handleTouchUIUpdate();
 

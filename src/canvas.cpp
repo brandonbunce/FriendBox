@@ -1,6 +1,6 @@
-#include "canvas.h"
-#include "display.h"
-#include "ui.h"
+#include "canvas.hpp"
+#include "display.hpp"
+#include "ui.hpp"
 
 uint16_t draw_color_palette[16] = {
     0x0000, // Black (0)
@@ -56,7 +56,6 @@ int currentRainbowPaletteIndex = 0;
 int currentBrushRadius = 5;
 int currentSaveSlot = 0;
 
-/* Stores our image drawing buffer. About ~76.8kb! */
 uint8_t *canvas_framebuffer;
 
 void drawPixelToFB(int x, int y, uint8_t colorIndex)
@@ -75,7 +74,6 @@ void drawPixelToFB(int x, int y, uint8_t colorIndex)
     // This doesnt update display...
 }
 
-/** Draw a circle brush at x,y with given radius and color - Updates BOTH framebuffer and screen in real-time! */
 void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex)
 {
     // Draw filled circle using midpoint circle algorithm
@@ -157,7 +155,6 @@ void drawClearScreen()
     drawFramebuffer();
 }
 
-/** Draw to screen if within canvas context! */
 void handleCanvasDraw()
 {
     if (currentScreen == SCREEN_CANVAS && touchZ)
@@ -189,7 +186,6 @@ void handleCanvasDraw()
     }
 }
 
-/* Change brush size while keeping brush size above 0.*/
 void changeBrushSize(int targetValue)
 {
     if (targetValue > 0 && targetValue <= 100)
@@ -200,7 +196,6 @@ void changeBrushSize(int targetValue)
     }
 }
 
-// Helper functions to change tool settings
 void setDrawColor(uint8_t colorIndex)
 {
     if (colorIndex < 16)

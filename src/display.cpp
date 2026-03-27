@@ -1,5 +1,5 @@
-#include "display.h"
-#include "canvas.h"
+#include "display.hpp"
+#include "canvas.hpp"
 
 // Display
 LGFX tft;
@@ -111,7 +111,6 @@ bool initTouch(bool forceCalibrate)
     return true;
 }
 
-// Replace specified areas with corresponding contents of the framebuffer. Passing no parameters, this will be the entire screen.
 void drawFramebuffer(int x, int y, int w, int h)
 {
     int x1 = max(0, x);
@@ -158,7 +157,6 @@ void drawFramebuffer(int x, int y, int w, int h)
     tft.endWrite();
 }
 
-/** Read from the display, and queue touch points if valid. */
 void handleTouch()
 {
     uint16_t localTouchX, localTouchY;

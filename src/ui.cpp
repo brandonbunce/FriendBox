@@ -1,8 +1,8 @@
-#include "ui.h"
-#include "display.h"
-#include "canvas.h"
-#include "io.h"
-#include "network.h"
+#include "ui.hpp"
+#include "display.hpp"
+#include "canvas.hpp"
+#include "io.hpp"
+#include "network.hpp"
 
 UIList friendListUI;
 UIList fileListUI;
@@ -39,10 +39,6 @@ static const char *SCREEN_FILE_BROWSER_FILE_BUTTON_LABEL[SCREEN_FILE_BROWSER_FIL
 UIButton SCREEN_FILE_BROWSER_NAVI_BUTTON[SCREEN_FILE_BROWSER_NAVI_BUTTON_COUNT];
 static const char *SCREEN_FILE_BROWSER_NAVI_BUTTON_LABEL[SCREEN_FILE_BROWSER_NAVI_BUTTON_COUNT] = {"Back", "Sort", "/\\", "\\/"};
 
-/** Run this to check the target button for inputs, and register a logical press when the button is pressed according to mode.
- * @param targetButton The button we are checking for input on.
- * @param buttonMode The mode we are checking for input in, this determines when we register a logical press.
- */
 bool handleUIButtonPress(UIButton *targetButton, ui_button_mode_id_t buttonMode)
 {
     // 1. Check if currently touching
@@ -551,12 +547,6 @@ void changeScreenContext(screen_id_t targetScreen)
     }
 }
 
-/** Switch context to loading screen and show while waiting for operations or network activity.
- * @param subtitle Subtitle to show under loading text, can be used to give more context on what we're waiting for.
- * @param holdTimeMs How long should we hold before returning?
- * @param subsubtitle Self-explanatory.
- * @param subsubsubtitle Self-explanatory.
- */
 void drawFriendboxLoadingScreen(const char *subtitle, int holdTimeMs, const char *subsubtitle, const char *subsubsubtitle)
 {
     lastScreen = currentScreen;                 // Store last screen to return to after showing loading screen.
@@ -581,9 +571,6 @@ void drawFriendboxLoadingScreen(const char *subtitle, int holdTimeMs, const char
     changeScreenContext(lastScreen); // Return to previous context after showing loading screen.
 }
 
-/** Check if UI is already initialized for a given screen context. If it's not, initialize it.
- * @param targetScreen The screen context we want to check for initialization and initialize if not already.
- */
 void initUIForScreen(screen_id_t targetScreen)
 {
     if (checkIfUIIsInitialized(targetScreen))
@@ -890,10 +877,7 @@ void drawScreenFileBrowser(int page)
     fileListUI.page = page;
 }
 
-/**
- * Draw
- * @param page Starting from zero, show which "page" of friends we're showing in the address book. Each page shows 5 friends, so page 0 shows friends 0-4, page 1 shows friends 5-9, etc.
- */
+
 void drawScreenSend(int page)
 {
     Serial.print("Drawing SCREEN_SEND on page ");
@@ -1239,10 +1223,6 @@ bool drawSketchPreview(const char *filepath, int x, int y, int scaleDown, bool d
     return true;
 }
 
-/** Loop through current UI elements to see if any exist belonging to the target context.
- * @param targetScreen Which screen context are we checking for?
- * @return bool True if we find an element in the target context, false if we loop through all elements without finding one.
- */
 bool checkIfUIIsInitialized(screen_id_t targetScreen)
 {
     for (int i = 0; i < uiButtons.size(); i++)
@@ -1255,10 +1235,6 @@ bool checkIfUIIsInitialized(screen_id_t targetScreen)
     return false;
 }
 
-/**
- * Search all registered UI buttons, determine if they are in context, and if not, write over them with canvas.
- * @param removeFromContext On top of redrawing over element, should we also remove it from the UI elements vector?
- */
 void cleanupUIOutOfContext(bool removeFromContext)
 {
     // Serial.print("UI Elements in Context:");

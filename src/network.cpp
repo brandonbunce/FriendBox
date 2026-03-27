@@ -1,6 +1,6 @@
-#include "network.h"
-#include "display.h"
-#include "canvas.h"
+#include "network.hpp"
+#include "display.hpp"
+#include "canvas.hpp"
 
 // Network
 HTTPClient http;

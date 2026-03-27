@@ -1,11 +1,11 @@
 #include <Arduino.h>
 
-#include "secrets.h"
-#include "canvas.h"
-#include "display.h"
-#include "io.h"
-#include "network.h"
-#include "ui.h"
+#include "secrets.hpp"
+#include "canvas.hpp"
+#include "display.hpp"
+#include "io.hpp"
+#include "network.hpp"
+#include "ui.hpp"
 
 // (C) 2025-2026 Brandon Bunce - FriendBox System Software
 #define FRIENDBOX_DEBUG_MODE true

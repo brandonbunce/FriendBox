@@ -1,5 +1,5 @@
-#ifndef CANVAS_H
-#define CANVAS_H
+#ifndef CANVAS_HPP
+#define CANVAS_HPP
 
 #include <Arduino.h>
 #include <SPI.h>
@@ -54,13 +54,20 @@ extern int currentBrushRadius;
 extern int currentSaveSlot;
 
 // Functions
+/* Change brush size while keeping brush size above 0.*/
 void changeBrushSize(int targetValue);
+/* Helper function to set draw color.*/
 void setDrawColor(uint8_t colorIndex);
+/* Helper function to set background color.*/
+void setBackgroundColor(uint8_t colorIndex);
 void drawTest4();
 void drawClearScreen();
+/* Stores our image drawing buffer. About ~76.8kb! */
 void drawPixelToFB(int x, int y, uint8_t colorIndex);
+/** Draw a circle brush at x,y with given radius and color - Updates BOTH framebuffer and screen in real-time! */
 void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex);
 void drawDitherToFB(int x, int y, int radius, uint8_t colorIndex);
+/** Draw to screen if within canvas context! */
 void handleCanvasDraw();
 
 #endif
