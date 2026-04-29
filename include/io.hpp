@@ -6,15 +6,15 @@
 #include <SD.h>
 #include <Preferences.h>
 
-#define SD_CS 26
-#define SD_SCK 14
-#define SD_MISO 32
-#define SD_MOSI 13
+#define SD_CS 12
+#define SD_SCK 16
+#define SD_MISO 21
+#define SD_MOSI 15
 extern Preferences nvs;
 
 // Input (Buttons)
 /** Which GPIO pin will be used as input for the hall effect button? */
-#define HALL_SENSOR_PIN 27
+#define HALL_SENSOR_PIN 15
 /** How long should button be pressed before logically registering input? */
 #define DEBOUNCE_MILLISECONDS 50
 

@@ -31,14 +31,14 @@ bool initDisplay()
     tft.setColorDepth(16);
 
     // Allocate framebuffer in ROTATED dimensions
-    canvas_framebuffer = (uint8_t *)malloc((tft.width() * tft.height()) / 2); // 76.8 KB
+    canvas_framebuffer = (uint8_t *)malloc((tft.width() * tft.height()) / 4); // 76.8 KB
     if (!canvas_framebuffer)
     {
         Serial.println("FATAL: Framebuffer allocation failed!");
         while (1)
             ;
     }
-    memset(canvas_framebuffer, 0, (tft.width() * tft.height()) / 2);
+    memset(canvas_framebuffer, 0, (tft.width() * tft.height()) / 4);
     return true;
 }
 
@@ -163,10 +163,10 @@ void handleTouch()
     if (tft.getTouch(&localTouchX, &localTouchY) && (localTouchX >= 0 && localTouchX < TFT_HOR_RES &&
                                                      localTouchY >= 0 && localTouchY < TFT_VER_RES))
     { // Touching in bounds
-        // Serial.print("Touch - X: ");
-        // Serial.print(localTouchX);
-        // Serial.print(" Y: ");
-        // Serial.println(localTouchY);
+        Serial.print("Touch - X: ");
+        Serial.print(localTouchX);
+        Serial.print(" Y: ");
+        Serial.println(localTouchY);
 
         // Drop inputs until we exceed TOUCH_INPUT_BUFFER, this prevents smearing from pen applying pressure.
         if (++touch_count > TOUCH_INPUT_BUFFER)

@@ -23,6 +23,7 @@ bool initNVS();
 void initFriendbox()
 {
   currentDrawColorIndex = 0 + (esp_random() % (15 - 0 + 1));
+
   initDisplay();
   drawFriendboxLoadingScreen("Starting...", 0, "Initializing SD");
   if (initSD(false))
@@ -39,8 +40,9 @@ void initFriendbox()
     drawFriendboxLoadingScreen("Starting...", 250, "Initializing SD", "Done!");
   }
   drawFriendboxLoadingScreen("Starting...", 0, "Initializing Touch");
-  if (initTouch(false))
+  if (true)//initTouch(false))
   {
+    Serial.println("Inited Touch!");
     drawFriendboxLoadingScreen("Starting...", 250, "Initializing Touch", "Done!");
   }
   drawFriendboxLoadingScreen("Starting...", 0, "Initializing Wi-Fi", NETWORK_SSID);
@@ -68,7 +70,7 @@ void setup()
   Serial.print(FRIENDBOX_SOFTWARE_VERSION);
   Serial.println(" - DEBUG");
 #endif
- initMenuButton();
+ //initMenuButton();
   initFriendbox();
 }
 
