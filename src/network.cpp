@@ -90,7 +90,7 @@ bool networkSendCanvas()
   HTTPClient http;
 
   // Calculate size
-  size_t framebufferSize = (TFT_HOR_RES * TFT_VER_RES) / 2; // 76,800 bytes
+  size_t framebufferSize = (TFT_HOR_RES * TFT_VER_RES) / 2;
 
   http.begin("http://192.168.1.8:8000/sketches/upload");
   http.addHeader("Content-Type", "application/octet-stream");

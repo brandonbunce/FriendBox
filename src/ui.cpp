@@ -1148,16 +1148,16 @@ void drawScreenCanvasMenu()
 
 bool drawSketchPreview(const char *filepath, int x, int y, int scaleDown, bool drawBorder)
 {
-    // scale = 2 means 480x320 → 240x160
-    // scale = 3 means 480x320 → 160x107
-    // scale = 4 means 480x320 → 120x80
+    // scale = 2 means 480x480 → 240x240
+    // scale = 3 means 480x480 → 160x160
+    // scale = 4 means 480x480 → 120x120
 
     File f = SD.open(filepath, FILE_READ);
     if (!f)
         return false;
 
-    const int SOURCE_WIDTH = 480;
-    const int SOURCE_HEIGHT = 320;
+    const int SOURCE_WIDTH  = TFT_HOR_RES;
+    const int SOURCE_HEIGHT = TFT_VER_RES;
     int w = SOURCE_WIDTH / scaleDown;
     int h = SOURCE_HEIGHT / scaleDown;
 

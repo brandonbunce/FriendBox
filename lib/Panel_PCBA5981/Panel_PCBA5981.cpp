@@ -513,9 +513,9 @@ bool Panel_PCBA5981::init(bool use_reset)
 
 color_depth_t Panel_PCBA5981::setColorDepth(color_depth_t depth)
 {
-    _write_depth = rgb565_2Byte;
-    _read_depth  = rgb565_2Byte;
-    return rgb565_2Byte;
+    _write_depth = rgb565_nonswapped;
+    _read_depth  = rgb565_nonswapped;
+    return rgb565_nonswapped;
 }
 
 void Panel_PCBA5981::setRotation(uint_fast8_t r)

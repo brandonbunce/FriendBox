@@ -29,9 +29,11 @@ bool initDisplay()
     tft.setRotation(3); // This option enables suffering. Don't forget to account for coordinate translation!
     tft.setBrightness(255);
     tft.setColorDepth(16);
+    delay(2000);
 
     // Allocate framebuffer in ROTATED dimensions
-    canvas_framebuffer = (uint8_t *)malloc((tft.width() * tft.height()) / 4); // 76.8 KB
+    // 4-bit indexed colour, 2 pixels per byte: 480*480/2 = 115,200 bytes.
+    canvas_framebuffer = (uint8_t *)malloc((tft.width() * tft.height()) / 4);
     if (!canvas_framebuffer)
     {
         Serial.println("FATAL: Framebuffer allocation failed!");

@@ -9,7 +9,7 @@
 #define SD_CS 12
 #define SD_SCK 16
 #define SD_MISO 21
-#define SD_MOSI 15
+#define SD_MOSI 33
 extern Preferences nvs;
 
 // Input (Buttons)
