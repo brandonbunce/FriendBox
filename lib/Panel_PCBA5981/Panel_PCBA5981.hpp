@@ -89,6 +89,39 @@ namespace lgfx
     void beginTransaction(void) override;
     void endTransaction(void) override;
 
+    // -- Multi-frame SDRAM addressing -------------------------------------
+    // Bytes per frame at the chip's native 16bpp RGB565 depth.
+    static constexpr uint32_t framebufferBytes16bpp(uint16_t w, uint16_t h)
+    { return (uint32_t)w * h * 2; }
+
+    // Switch the SDRAM address that the panel scans out for display.
+    // Address must be 4-byte aligned.
+    void setMainImageAddress(uint32_t addr);
+
+    // Switch the SDRAM address that subsequent draws (and readRect) target.
+    // Address must be 4-byte aligned. Use to direct ops into a frame slot
+    // other than the displayed one (undo buffer, animation slot, etc.).
+    void setCanvasAddress(uint32_t addr);
+
+    // Hardware-accelerated rect copy between two SDRAM frame slots via the
+    // BTE. Both slots are assumed to share the same image_width (panel width).
+    // Use for backing-store snapshot/restore, undo capture, animation prep.
+    void blitFrames(uint32_t src_addr, uint16_t src_x, uint16_t src_y,
+                    uint32_t dst_addr, uint16_t dst_x, uint16_t dst_y,
+                    uint16_t w, uint16_t h);
+
+    // Filled-rectangle draw via the Geometric Drawing Engine (datasheet
+    // section 6.3). Single REG[76h] kick - the chip rasterises in hardware,
+    // no per-pixel SPI traffic. Coordinates are in canvas pixel space.
+    void drawFilledRectGeo(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2,
+                           uint16_t rgb565);
+
+    // Write a row of native RGB565 pixels directly to the canvas, bypassing
+    // the LovyanGFX pixelcopy machinery. Use this for bulk transfers where
+    // the source is already in the panel's wire format (e.g. SD load path).
+    void writeRawPixels(uint16_t x, uint16_t y, uint16_t w, const uint16_t* data);
+    // ---------------------------------------------------------------------
+
     color_depth_t setColorDepth(color_depth_t depth) override;
     void setRotation(uint_fast8_t r) override;
 
@@ -142,6 +175,15 @@ namespace lgfx
     void _start_memorywrite(void);
     void _set_forecolor(uint32_t rawcolor);
     void _write_pixel16(uint16_t color);
+
+    // Read one byte from the LT7680 memory port via the [0xC0] prefix
+    // CS-toggled 16-bit transaction.
+    uint8_t _read_byte(void);
+
+    // Configure the read window and prime REG[04h] for sequential
+    // [0xC0]-prefixed memory reads. Discards the dummy first byte that
+    // the chip emits after a port-mode switch (datasheet section 13.4).
+    void _start_memoryread(uint16_t x, uint16_t y, uint16_t w, uint16_t h);
 
     // Bit-bang the ST7701S 9-bit serial init sequence on the shared SPI pins.
     // The LovyanGFX bus must be released before calling and re-init'd after.

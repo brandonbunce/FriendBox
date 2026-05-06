@@ -7,6 +7,39 @@
 Preferences nvs; // https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/storage/nvs_flash.html
 SPIClass sdspi = SPIClass(HSPI);
 
+// File format on disk: 480*480 = 230,400 pixels packed two-per-byte as 4-bit
+// palette indices, MSB nibble = even pixel, LSB nibble = odd pixel.
+// Total file size: 115,200 bytes per saved sketch.
+static constexpr size_t SKETCH_FILE_BYTES = (TFT_HOR_RES * TFT_VER_RES) / 2;
+static constexpr size_t SKETCH_PACKED_BYTES_PER_ROW = TFT_HOR_RES / 2;
+
+// Map an RGB565 colour read back from LT7680 SDRAM to its 4-bit palette index.
+// Drawing only writes draw_color_palette[i] colours, so an exact match is
+// expected; the nearest-distance fallback is just defensive against reads
+// from regions that might have been touched by non-canvas drawing.
+static uint8_t paletteIndexForColor(uint16_t color)
+{
+    for (uint8_t i = 0; i < 16; i++)
+    {
+        if (draw_color_palette[i] == color) return i;
+    }
+    uint8_t  best_idx  = 0;
+    uint32_t best_dist = UINT32_MAX;
+    int r = (color >> 11) & 0x1F;
+    int g = (color >>  5) & 0x3F;
+    int b =  color        & 0x1F;
+    for (uint8_t i = 0; i < 16; i++)
+    {
+        uint16_t pc = draw_color_palette[i];
+        int dr = ((pc >> 11) & 0x1F) - r;
+        int dg = ((pc >>  5) & 0x3F) - g;
+        int db = ( pc        & 0x1F) - b;
+        uint32_t dist = (uint32_t)(dr * dr + dg * dg + db * db);
+        if (dist < best_dist) { best_dist = dist; best_idx = i; }
+    }
+    return best_idx;
+}
+
 bool initNVS()
 {
   nvs.begin("Friendbox", true);
@@ -43,6 +76,54 @@ bool initMenuButton() {
     return true;
 }
 
+// Stream the canvas to an open file, line-by-line: read 480 RGB565 pixels
+// from LT7680 SDRAM, quantise each to its 4-bit palette index, pack two
+// indices per byte, write 240 bytes. Result on disk = 115,200 bytes (same
+// format as the pre-SDRAM-canvas era - existing saves stay loadable).
+static bool writeCanvasToFile(File &f)
+{
+    static uint16_t lineBuf[TFT_HOR_RES];
+    static uint8_t  packed[SKETCH_PACKED_BYTES_PER_ROW];
+    for (int y = 0; y < TFT_VER_RES; y++)
+    {
+        tft.readRect(0, y, TFT_HOR_RES, 1, lineBuf);
+        for (int x = 0; x < TFT_HOR_RES; x += 2)
+        {
+            uint8_t hi = paletteIndexForColor(lineBuf[x    ]) & 0x0F;
+            uint8_t lo = paletteIndexForColor(lineBuf[x + 1]) & 0x0F;
+            packed[x >> 1] = (hi << 4) | lo;
+        }
+        if (f.write(packed, SKETCH_PACKED_BYTES_PER_ROW) != SKETCH_PACKED_BYTES_PER_ROW)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Stream a 4-bit packed sketch from an open file into the LT7680 SDRAM
+// display slot via tft.pushImage. Then snapshots to the backing slot so
+// later UI overlay restores see the loaded canvas, not pre-load garbage.
+static bool readCanvasFromFile(File &f)
+{
+    static uint8_t  packed[SKETCH_PACKED_BYTES_PER_ROW];
+    static uint16_t lineBuf[TFT_HOR_RES];
+    for (int y = 0; y < TFT_VER_RES; y++)
+    {
+        if (f.read(packed, SKETCH_PACKED_BYTES_PER_ROW) != SKETCH_PACKED_BYTES_PER_ROW)
+            return false;
+        for (int x = 0; x < TFT_HOR_RES; x += 2)
+        {
+            uint8_t b = packed[x >> 1];
+            lineBuf[x    ] = draw_color_palette[(b >> 4) & 0x0F];
+            lineBuf[x + 1] = draw_color_palette[ b       & 0x0F];
+        }
+        tft.writeRawPixels(0, y, TFT_HOR_RES, lineBuf);
+    }
+    snapshotCanvas();
+    return true;
+}
+
 void saveImageToSD(int slot)
 {
     drawFriendboxLoadingScreen("Saving...", 0);
@@ -56,23 +137,29 @@ void saveImageToSD(int slot)
     File f = SD.open(filename, FILE_WRITE);
     if (f)
     {
-        f.write(canvas_framebuffer, (TFT_HOR_RES * TFT_VER_RES) / 2);
+        bool ok = writeCanvasToFile(f);
         f.close();
-        currentSaveSlot = slot;
-        nvs.begin("Friendbox", false);
-        nvs.putUInt("lastActiveSlot", currentSaveSlot);
-        nvs.end();
-        drawFriendboxLoadingScreen("Saved!", 250);
-        drawFramebuffer();
+        if (ok)
+        {
+            currentSaveSlot = slot;
+            nvs.begin("Friendbox", false);
+            nvs.putUInt("lastActiveSlot", currentSaveSlot);
+            nvs.end();
+            drawFriendboxLoadingScreen("Saved!", 250);
 #ifdef FRIENDBOX_DEBUG_MODE
-        Serial.print("Saved image to save slot ");
-        Serial.print(slot);
-        Serial.println("!");
+            Serial.print("Saved image to save slot ");
+            Serial.print(slot);
+            Serial.println("!");
 #endif
+        }
+        else
+        {
+            drawFriendboxLoadingScreen("ERROR: WRITE TRUNCATED!", 1000);
+        }
+        drawFramebuffer();
     }
     else
     {
-        f.close();
         drawFriendboxLoadingScreen("ERROR: SAVE FAILED!", 1000);
         drawFramebuffer();
     }
@@ -88,9 +175,8 @@ void loadSketchFromSD(const char *path)
     File f = SD.open(filename, FILE_READ);
     if (f)
     {
-        f.read(canvas_framebuffer, (TFT_VER_RES * TFT_HOR_RES) / 2);
+        readCanvasFromFile(f);
         f.close();
-        drawFramebuffer();
     }
     else
     {
@@ -113,9 +199,8 @@ void loadImageFromSD(int slot)
     File f = SD.open(filename, FILE_READ);
     if (f)
     {
-        f.read(canvas_framebuffer, (TFT_HOR_RES * TFT_VER_RES) / 2);
+        readCanvasFromFile(f);
         f.close();
-        drawFramebuffer();
         currentSaveSlot = slot;
         nvs.begin("Friendbox", false);
         nvs.putUInt("lastActiveSlot", currentSaveSlot);

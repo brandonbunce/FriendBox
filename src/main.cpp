@@ -11,12 +11,6 @@
 #define FRIENDBOX_DEBUG_MODE true
 #define FRIENDBOX_SOFTWARE_VERSION "Software v0.3"
 
-struct Friend
-{
-  String name;
-  int userID;
-};
-
 // Functions
 bool initNVS();
 
@@ -25,39 +19,53 @@ void initFriendbox()
   currentDrawColorIndex = 0 + (esp_random() % (15 - 0 + 1));
 
   initDisplay();
-  drawFriendboxLoadingScreen("Starting...", 0, "Initializing SD");
+  drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 0, "Initializing SD");
   if (initSD(false))
   {
-    drawFriendboxLoadingScreen("Starting...", 250, "Initializing SD", "Done!");
+    drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 250, "Initializing SD", "Done!");
   }
   else
   {
-    drawFriendboxLoadingScreen("Starting...", 0, "Initializing SD", "Error! Retrying...");
+    drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 0, "Initializing SD", "Error! Retrying...");
     while (!initSD())
     {
       delay(1000);
     }
-    drawFriendboxLoadingScreen("Starting...", 250, "Initializing SD", "Done!");
+    drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 250, "Initializing SD", "Done!");
   }
-  drawFriendboxLoadingScreen("Starting...", 0, "Initializing Touch");
-  if (true)//initTouch(false))
+  if (initCanvas())
+  {
+    drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 250, "Initializing Canvas", "Done!");
+  }
+  else
+  {
+    drawFriendboxLoadingScreen("Fiddlesticks!", 2000, "Canvas allocation failed!", "Pixel data will not be saved.");
+  }
+  drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 0, "Initializing Touch");
+  if (true) // initTouch(false))
   {
     Serial.println("Inited Touch!");
-    drawFriendboxLoadingScreen("Starting...", 250, "Initializing Touch", "Done!");
+    drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 250, "Initializing Touch", "Done!");
   }
-  drawFriendboxLoadingScreen("Starting...", 0, "Initializing Wi-Fi", NETWORK_SSID);
+  drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 0, "Initializing Wi-Fi", NETWORK_SSID);
   if (initNetwork(NETWORK_SSID, NETWORK_PASS, LOCAL_HOSTNAME))
   {
-    drawFriendboxLoadingScreen("Starting...", 250, "Initializing Wi-Fi", "Done!");
+    drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 250, "Initializing Wi-Fi", "Done!");
   }
-  drawFriendboxLoadingScreen("Starting...", 0, "Initializing NVS");
+  drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 0, "Initializing NVS");
   if (initNVS())
   {
-    drawFriendboxLoadingScreen("Starting...", 500, "Initializing NVS", "Done!");
+    drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 500, "Initializing NVS", "Done!");
   }
-  nvs.begin("Friendbox", true);
-  loadImageFromSD(nvs.getUInt("lastActiveSlot", 8));
-  nvs.end();
+  tft.fillScreen(draw_color_palette[currentDrawColorIndex]);
+  drawTestSquare();
+  delay(1000);
+  if (couldInitCanvasFrameBuffer)
+  {
+    nvs.begin("Friendbox", true);
+    loadImageFromSD(nvs.getUInt("lastActiveSlot", 8));
+    nvs.end();
+  }
   changeScreenContext(SCREEN_CANVAS);
 }
 
@@ -70,7 +78,7 @@ void setup()
   Serial.print(FRIENDBOX_SOFTWARE_VERSION);
   Serial.println(" - DEBUG");
 #endif
- //initMenuButton();
+  // initMenuButton();
   initFriendbox();
 }
 

@@ -94,6 +94,21 @@ void Panel_PCBA5981::_wait_sdram_ready(void)
     cs_control(false);
 }
 
+// Read one byte from the LT7680 memory port: [0xC0][_data_].
+// CS toggled around the full 16-bit transaction; one byte returned per call.
+uint8_t Panel_PCBA5981::_read_byte(void)
+{
+    _bus->wait();
+    cs_control(true);
+    cs_control(false);
+    _bus->writeCommand(0xC0, 8);
+    _bus->beginRead(0);
+    uint8_t b = (uint8_t)_bus->readData(8);
+    _bus->endRead();
+    cs_control(true);
+    return b;
+}
+
 //============================================================================
 // Mid-level drawing helpers
 //============================================================================
@@ -125,6 +140,30 @@ void Panel_PCBA5981::_start_memorywrite(void)
     cs_control(true);
 
     _flg_memorywrite = true;
+}
+
+// Configure the read window and prime REG[04h] for sequential reads.
+// REG[03h] bits[1:0] = 00b selects the Image buffer (Display RAM) for both
+// reads and writes; direction is implicit in the next port op (read = [0xC0],
+// write = [0x80]). The first read after switching to the read port is dummy
+// per datasheet section 13.4 - we discard it here.
+void Panel_PCBA5981::_start_memoryread(uint16_t x, uint16_t y, uint16_t w, uint16_t h)
+{
+    _flg_memorywrite = false;
+
+    _set_active_window(x, y, w, h);
+
+    _write_reg(0x03, 0x00);  // ICR: graphic mode, target = Image buffer
+
+    // Select MRWDP (REG[04h]) so subsequent [0xC0] reads pull pixel data.
+    _bus->wait();
+    cs_control(true);
+    cs_control(false);
+    _bus->writeCommand((uint32_t)0x04 << 8, 16);
+    _bus->wait();
+    cs_control(true);
+
+    (void)_read_byte();  // discard dummy first byte
 }
 
 void Panel_PCBA5981::_write_pixel16(uint16_t color)
@@ -163,6 +202,98 @@ void Panel_PCBA5981::end_transaction(void)
     _bus->wait();
     cs_control(true);
     _bus->endTransaction();
+}
+
+//============================================================================
+// Multi-frame SDRAM addressing
+//============================================================================
+
+void Panel_PCBA5981::setMainImageAddress(uint32_t addr)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+    _write_reg32(0x20, addr);   // MISA: Main Image Start Address
+    if (!tr) end_transaction();
+}
+
+void Panel_PCBA5981::setCanvasAddress(uint32_t addr)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+    _write_reg32(0x50, addr);   // CVSSA: Canvas Start Address
+    _flg_memorywrite = false;   // force active-window reload on next access
+    if (!tr) end_transaction();
+}
+
+// Filled rectangle via the Geometric Drawing Engine (datasheet section 6.3).
+// Programs the rectangle endpoints into REG[68h-6Fh], the foreground colour
+// into REG[D2h-D4h], then sets REG[76h] = bit7|bit6|bits[5:4]=10b which is
+// "start | fill | rectangle". Polls STSR bit3 for completion.
+void Panel_PCBA5981::drawFilledRectGeo(uint16_t x1, uint16_t y1,
+                                        uint16_t x2, uint16_t y2,
+                                        uint16_t rgb565)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+
+    // Foreground colour - REG[D2h] R[7:3] in bits[7:3], REG[D3h] G[7:2] in
+    // bits[7:2], REG[D4h] B[7:3] in bits[7:3]. _set_forecolor handles the
+    // bit-packing for an RGB565 value.
+    _set_forecolor(rgb565);
+
+    // Start (top-left) and end (bottom-right) points.
+    _write_reg16(0x68, x1);   // DLHSR : start X
+    _write_reg16(0x6A, y1);   // DLVSR : start Y
+    _write_reg16(0x6C, x2);   // DLHER : end   X
+    _write_reg16(0x6E, y2);   // DLVER : end   Y
+
+    // DCR1 = 0xD0:
+    //   bit7=1   start
+    //   bit6=1   fill
+    //   bits[5:4]=10b   draw rectangle
+    _write_reg(0x76, 0xD0);
+
+    _wait_busy();
+    _flg_memorywrite = false;
+
+    if (!tr) end_transaction();
+}
+
+void Panel_PCBA5981::blitFrames(uint32_t src_addr, uint16_t src_x, uint16_t src_y,
+                                  uint32_t dst_addr, uint16_t dst_x, uint16_t dst_y,
+                                  uint16_t w, uint16_t h)
+{
+    if (w == 0 || h == 0) return;
+
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+
+    // Memory copy with ROP=copy, op=positive direction memory copy.
+    _write_reg(0x91, 0xC2);
+    // S0 = 16bpp, dest = 16bpp.
+    _write_reg(0x92, 0x21);
+
+    // S0 (source).
+    _write_reg32(0x93, src_addr);
+    _write_reg16(0x97, (uint16_t)timing.h_display);
+    _write_reg16(0x99, src_x);
+    _write_reg16(0x9B, src_y);
+
+    // Destination.
+    _write_reg32(0xA7, dst_addr);
+    _write_reg16(0xAB, (uint16_t)timing.h_display);
+    _write_reg16(0xAD, dst_x);
+    _write_reg16(0xAF, dst_y);
+
+    _write_reg16(0xB1, w);
+    _write_reg16(0xB3, h);
+
+    _write_reg(0x90, 0x10);   // BTE start
+    _wait_busy();
+
+    _flg_memorywrite = false;
+
+    if (!tr) end_transaction();
 }
 
 //============================================================================
@@ -664,9 +795,9 @@ void Panel_PCBA5981::writeImage(uint_fast16_t x, uint_fast16_t y,
         {
             for (uint_fast16_t i = 0; i < w; i++)
             {
-                uint16_t pix = 0;
+                uint32_t pix = 0;
                 param->fp_copy(&pix, i, i + 1, param);
-                _write_pixel16(pix);
+                _write_pixel16((uint16_t)pix);
             }
             param->src_x = src_x;
             param->src_y++;
@@ -685,9 +816,9 @@ void Panel_PCBA5981::writeImage(uint_fast16_t x, uint_fast16_t y,
                 _start_memorywrite();
                 for (uint32_t j = 0; j < len; j++)
                 {
-                    uint16_t pix = 0;
+                    uint32_t pix = 0;
                     param->fp_copy(&pix, 0, 1, param);
-                    _write_pixel16(pix);
+                    _write_pixel16((uint16_t)pix);
                 }
                 if (w == (i += len)) break;
             }
@@ -712,12 +843,24 @@ void Panel_PCBA5981::writePixels(pixelcopy_t* param, uint32_t len, bool use_dma)
 
         for (uint32_t i = 0; i < w; i++)
         {
-            uint16_t pix = 0;
+            uint32_t pix = 0;
             param->fp_copy(&pix, 0, 1, param);
-            _write_pixel16(pix);
+            _write_pixel16((uint16_t)pix);
         }
         len -= w;
     } while (len);
+}
+
+void Panel_PCBA5981::writeRawPixels(uint16_t x, uint16_t y,
+                                     uint16_t w, const uint16_t* data)
+{
+    if (w == 0) return;
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+    setWindow(x, y, x + w - 1, y);
+    _start_memorywrite();
+    for (uint16_t i = 0; i < w; i++) _write_pixel16(data[i]);
+    if (!tr) end_transaction();
 }
 
 //============================================================================
@@ -755,16 +898,59 @@ void Panel_PCBA5981::copyRect(uint_fast16_t dst_x, uint_fast16_t dst_y,
 }
 
 //============================================================================
-// Read back (not implemented in SPI mode)
+// Read back from SDRAM via [0xC0]+read
 //============================================================================
-
+// Bytes are streamed back in the same order they were written:
+// for 16bpp, low byte then high byte per pixel. Total bytes per pixel = 2.
+//
+// Speed note: each _read_byte() is a 16-bit CS-toggled SPI transaction with
+// per-byte overhead. At 20 MHz freq_read on 480x480 RGB565 (460,800 bytes)
+// expect roughly half a second. Acceptable for one-shot save/load; not for
+// per-frame readback.
 void Panel_PCBA5981::readRect(uint_fast16_t x, uint_fast16_t y,
                                uint_fast16_t w, uint_fast16_t h,
                                void* dst, pixelcopy_t* param)
 {
-    uint32_t len = w * h;
-    uint8_t bytes = param->dst_bits >> 3;
-    memset(dst, 0, len * bytes);
+    if (w == 0 || h == 0) return;
+
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+
+    _start_memoryread((uint16_t)x, (uint16_t)y, (uint16_t)w, (uint16_t)h);
+
+    if (param->dst_bits == 16)
+    {
+        // Fast path: dst is RGB565. Stream straight in, no conversion.
+        uint16_t* d = (uint16_t*)dst;
+        uint32_t total = (uint32_t)w * h;
+        for (uint32_t i = 0; i < total; i++)
+        {
+            uint8_t lo = _read_byte();
+            uint8_t hi = _read_byte();
+            d[i] = (uint16_t)(((uint16_t)hi << 8) | lo);
+        }
+    }
+    else
+    {
+        // Generic path: read into a 16bpp line buffer, route through pixelcopy
+        // for whatever destination format the caller wanted.
+        static uint16_t lineBuf[480];
+        for (uint32_t row = 0; row < h; row++)
+        {
+            for (uint32_t col = 0; col < w; col++)
+            {
+                uint8_t lo = _read_byte();
+                uint8_t hi = _read_byte();
+                lineBuf[col] = (uint16_t)(((uint16_t)hi << 8) | lo);
+            }
+            param->src_data = lineBuf;
+            param->fp_copy(dst, row * w, row * w + w, param);
+        }
+    }
+
+    _flg_memorywrite = false;  // next write reconfigures the port
+
+    if (!tr) end_transaction();
 }
 
 //----------------------------------------------------------------------------

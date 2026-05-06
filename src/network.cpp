@@ -80,23 +80,67 @@ std::vector<std::string> networkGetFriends()
   return friendNames;
 }
 
-void networkReceiveFramebuffer()
+
+// Map RGB565 -> 4-bit palette index, copy of paletteIndexForColor in io.cpp.
+// Kept local so this file doesn't need to expose io.cpp internals.
+static uint8_t paletteIndexForColorNet(uint16_t color)
 {
-  // To implement
+  for (uint8_t i = 0; i < 16; i++)
+  {
+    if (draw_color_palette[i] == color) return i;
+  }
+  uint8_t  best_idx  = 0;
+  uint32_t best_dist = UINT32_MAX;
+  int r = (color >> 11) & 0x1F;
+  int g = (color >>  5) & 0x3F;
+  int b =  color        & 0x1F;
+  for (uint8_t i = 0; i < 16; i++)
+  {
+    uint16_t pc = draw_color_palette[i];
+    int dr = ((pc >> 11) & 0x1F) - r;
+    int dg = ((pc >>  5) & 0x3F) - g;
+    int db = ( pc        & 0x1F) - b;
+    uint32_t dist = (uint32_t)(dr * dr + dg * dg + db * db);
+    if (dist < best_dist) { best_dist = dist; best_idx = i; }
+  }
+  return best_idx;
 }
 
 bool networkSendCanvas()
 {
   HTTPClient http;
 
-  // Calculate size
-  size_t framebufferSize = (TFT_HOR_RES * TFT_VER_RES) / 2;
+  // 4-bit packed: 480*480/2 = 115,200 bytes. Same wire format as before;
+  // the server side does not need changes.
+  constexpr size_t framebufferSize = (TFT_HOR_RES * TFT_VER_RES) / 2;
+  constexpr size_t bytesPerRow     = TFT_HOR_RES / 2;
+
+  uint8_t *fb = (uint8_t *)malloc(framebufferSize);
+  if (!fb)
+  {
+    Serial.println("networkSendCanvas: malloc failed for upload buffer");
+    return false;
+  }
+
+  // Read the canvas line-by-line from LT7680 SDRAM and pack into fb.
+  uint16_t lineBuf[TFT_HOR_RES];
+  for (int y = 0; y < TFT_VER_RES; y++)
+  {
+    tft.readRect(0, y, TFT_HOR_RES, 1, lineBuf);
+    uint8_t *row = fb + (size_t)y * bytesPerRow;
+    for (int x = 0; x < TFT_HOR_RES; x += 2)
+    {
+      uint8_t hi = paletteIndexForColorNet(lineBuf[x    ]) & 0x0F;
+      uint8_t lo = paletteIndexForColorNet(lineBuf[x + 1]) & 0x0F;
+      row[x >> 1] = (hi << 4) | lo;
+    }
+  }
 
   http.begin("http://192.168.1.8:8000/sketches/upload");
   http.addHeader("Content-Type", "application/octet-stream");
 
-  // Send raw framebuffer data
-  int httpCode = http.POST(canvas_framebuffer, framebufferSize);
+  int httpCode = http.POST(fb, framebufferSize);
+  free(fb);
 
   if (httpCode == 200)
   {

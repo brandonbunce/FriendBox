@@ -44,16 +44,16 @@ typedef enum
     TOOL_STICKER
 } draw_tool_id_t;
 
-extern uint8_t *canvas_framebuffer;
-
 extern draw_tool_id_t currentTool;
 extern int currentBackgroundColorIndex;
 extern int currentDrawColorIndex;
 extern int currentRainbowPaletteIndex;
 extern int currentBrushRadius;
 extern int currentSaveSlot;
+extern bool couldInitCanvasFrameBuffer;
 
 // Functions
+bool initCanvas();
 /* Change brush size while keeping brush size above 0.*/
 void changeBrushSize(int targetValue);
 /* Helper function to set draw color.*/
@@ -62,9 +62,8 @@ void setDrawColor(uint8_t colorIndex);
 void setBackgroundColor(uint8_t colorIndex);
 void drawTest4();
 void drawClearScreen();
-/* Stores our image drawing buffer. About ~76.8kb! */
-void drawPixelToFB(int x, int y, uint8_t colorIndex);
-/** Draw a circle brush at x,y with given radius and color - Updates BOTH framebuffer and screen in real-time! */
+/** Draw a circle brush at x,y with given radius and color directly into the
+    LT7680 SDRAM display slot. */
 void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex);
 void drawDitherToFB(int x, int y, int radius, uint8_t colorIndex);
 /** Draw to screen if within canvas context! */

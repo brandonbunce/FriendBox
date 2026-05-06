@@ -28,7 +28,7 @@ public:
       auto cfg = _bus_instance.config();
       cfg.spi_host    = SPI3_HOST;
       cfg.spi_mode    = 0;
-      cfg.freq_write  = 50000000;
+      cfg.freq_write  = 80000000;
       cfg.freq_read   = 20000000;
       cfg.spi_3wire   = false;
       cfg.use_lock    = true;
@@ -97,5 +97,24 @@ public:
     }
 
     setPanel(&_panel_instance);
+  }
+
+  // Expose Panel_PCBA5981-specific hardware drawing so callers can use tft.xxx()
+  // without needing to cast tft.panel() themselves.
+  void drawFilledRectGeo(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint16_t rgb565)
+  {
+    static_cast<lgfx::Panel_PCBA5981 *>(panel())->drawFilledRectGeo(x1, y1, x2, y2, rgb565);
+  }
+  void writeRawPixels(uint16_t x, uint16_t y, uint16_t w, const uint16_t* data)
+  {
+    static_cast<lgfx::Panel_PCBA5981 *>(panel())->writeRawPixels(x, y, w, data);
+  }
+  void setCanvasAddress(uint32_t addr)
+  {
+    static_cast<lgfx::Panel_PCBA5981 *>(panel())->setCanvasAddress(addr);
+  }
+  void setMainImageAddress(uint32_t addr)
+  {
+    static_cast<lgfx::Panel_PCBA5981 *>(panel())->setMainImageAddress(addr);
   }
 };

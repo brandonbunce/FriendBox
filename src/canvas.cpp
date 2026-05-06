@@ -55,45 +55,34 @@ int currentDrawColorIndex = 3;
 int currentRainbowPaletteIndex = 0;
 int currentBrushRadius = 5;
 int currentSaveSlot = 0;
+bool couldInitCanvasFrameBuffer = 0;
 
-uint8_t *canvas_framebuffer;
-
-void drawPixelToFB(int x, int y, uint8_t colorIndex)
-{
-    if (x < 0 || x >= TFT_HOR_RES || y < 0 || y >= TFT_VER_RES)
-        return;
-
-    int index = y * TFT_HOR_RES + x;
-    int byteIndex = index >> 1;
-
-    if (index & 1)
-        canvas_framebuffer[byteIndex] = (canvas_framebuffer[byteIndex] & 0xF0) | (colorIndex & 0x0F);
-    else
-        canvas_framebuffer[byteIndex] = (canvas_framebuffer[byteIndex] & 0x0F) | ((colorIndex & 0x0F) << 4);
-
-    // This doesnt update display...
+bool initCanvas() {
+    // Canvas storage now lives in LT7680 SDRAM (slot 0) - see initDisplay().
+    // No ESP32 allocation needed. Kept as a distinct init step in case canvas
+    // bookkeeping needs to grow back later.
+    couldInitCanvasFrameBuffer = true;
+    return true;
 }
 
+// Brush stroke: fills a circle of `radius` around (x, y) with `colorIndex`.
+// Pixels are written straight to LT7680 SDRAM via tft.drawPixel; the chip
+// scans them out for "instant feedback". A snapshot to the backing slot is
+// taken on touch release in handleTouch().
 void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex)
 {
-    // Draw filled circle using midpoint circle algorithm
+    uint16_t color = draw_color_palette[colorIndex];
     for (int dy = -radius; dy <= radius; dy++)
     {
         for (int dx = -radius; dx <= radius; dx++)
         {
-            // Check if point is inside circle
             if (dx * dx + dy * dy <= radius * radius)
             {
                 int px = x + dx;
                 int py = y + dy;
-
-                // Draw to framebuffer
-                drawPixelToFB(px, py, colorIndex);
-
-                // Draw to screen immediately for instant feedback
                 if (px >= 0 && px < TFT_HOR_RES && py >= 0 && py < TFT_VER_RES)
                 {
-                    tft.drawPixel(px, py, draw_color_palette[colorIndex]);
+                    tft.drawPixel(px, py, color);
                 }
             }
         }
@@ -102,57 +91,44 @@ void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex)
 
 void drawDitherToFB(int x, int y, int radius, uint8_t colorIndex)
 {
-    // Draw filled circle using midpoint circle algorithm
+    uint16_t color = draw_color_palette[colorIndex];
     for (int dy = -radius; dy <= radius; dy++)
     {
         for (int dx = -radius; dx <= radius; dx++)
         {
-            // Check if point is inside circle
             if (dx * dx + dy * dy <= radius * radius)
             {
                 int px = x + dx;
                 int py = y + dy;
-
-                // Only draw even pixels.
-                if ((px % 2 == 0) && py % 2 == 0)
+                if ((px % 2 == 0) && (py % 2 == 0)
+                    && px >= 0 && px < TFT_HOR_RES && py >= 0 && py < TFT_VER_RES)
                 {
-                    // Draw to framebuffer
-                    drawPixelToFB(px, py, colorIndex);
-
-                    // Draw to screen immediately for instant feedback
-                    if (px >= 0 && px < TFT_HOR_RES && py >= 0 && py < TFT_VER_RES)
-                    {
-                        tft.drawPixel(px, py, draw_color_palette[colorIndex]);
-                    }
+                    tft.drawPixel(px, py, color);
                 }
             }
         }
     }
 }
 
+// 16 vertical colour stripes covering the whole canvas. Diagnostic only.
 void drawTest4()
 {
-    for (int y = 0; y < tft.height(); y++)
+    tft.startWrite();
+    for (uint8_t i = 0; i < 16; i++)
     {
-        for (int x = 0; x < tft.width(); x++)
-        {
-            uint8_t color = (x >> 5) & 0x0F; // 16 vertical stripes
-            drawPixelToFB(x, y, color);
-        }
+        // Each stripe is 32 pixels wide (480 / 16 = 30 - close enough; the
+        // (x>>5) version produced 15 full + 1 short stripe, keep that vibe).
+        int x0 = i * 32;
+        int w  = (i == 15) ? (TFT_HOR_RES - x0) : 32;
+        tft.fillRect(x0, 0, w, TFT_VER_RES, draw_color_palette[i]);
     }
+    tft.endWrite();
 }
 
 void drawClearScreen()
 {
-    for (int y = 0; y < tft.height(); y++)
-    {
-        for (int x = 0; x < tft.width(); x++)
-        {
-            drawPixelToFB(x, y, currentDrawColorIndex);
-        }
-    }
-    // updateDisplayWithFB();
-    drawFramebuffer();
+    tft.fillScreen(draw_color_palette[currentDrawColorIndex]);
+    snapshotCanvas();   // commit the cleared canvas to the backing slot
 }
 
 void handleCanvasDraw()
@@ -180,7 +156,7 @@ void handleCanvasDraw()
             break;
         case TOOL_STICKER:
             drawTest4();
-            drawFramebuffer();
+            snapshotCanvas();
             break;
         }
     }
