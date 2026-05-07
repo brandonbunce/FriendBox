@@ -231,7 +231,7 @@ void handleTouchUIUpdate()
                 if (handleUIButtonPress(&SCREEN_CANVAS_MENU_SAVE_BUTTON[b], ACT_ON_HOVER_AND_RELEASE))
                 {
                     changeScreenContext(SCREEN_CANVAS);
-                    saveImageToSD(b);
+                    //saveImageToSD(b);
                     changeScreenContext(SCREEN_CANVAS_MENU);
                 }
             }
@@ -249,7 +249,7 @@ void handleTouchUIUpdate()
                 if (handleUIButtonPress(&SCREEN_CANVAS_MENU_LOAD_BUTTON[b], ACT_ON_HOVER_AND_RELEASE))
                 {
                     changeScreenContext(SCREEN_CANVAS);
-                    loadImageFromSD(b);
+                    //loadImageFromSD(b);
                     changeScreenContext(SCREEN_CANVAS_MENU);
                 }
             }
@@ -320,7 +320,7 @@ void handleTouchUIUpdate()
                         drawFriendboxLoadingScreen("Failed to send.", 1000);
                         delay(500);
                     }
-                    drawFramebuffer();
+                    //drawFramebuffer();
                     changeScreenContext(SCREEN_SEND);
                     break;
                 case 1:
@@ -390,7 +390,7 @@ void handleTouchUIUpdate()
                     Serial.printf("Select Filename [%d]: %s\n", fileIndex, filename);
 
                     changeScreenContext(SCREEN_CANVAS);
-                    loadSketchFromSD(filename);
+                    //loadSketchFromSD(filename);
                     changeScreenContext(SCREEN_FILE_BROWSER);
                     drawScreenFileBrowser(fileListUI.page);
                 }
@@ -565,6 +565,7 @@ void drawFriendboxLoadingScreen(const char *subtitle, int holdTimeMs, const char
     if (subsubsubtitle != "")
     {
         tft.setTextSize(2);
+        tft.setTextWrap(true);
         tft.drawCenterString(subsubsubtitle, 240, 270);
     }
     delay(holdTimeMs);               // Wait a moment if specified.
@@ -788,10 +789,10 @@ void drawScreenFileBrowser(int page)
         for (int col = 0; col < SCREEN_FILE_BROWSER_FILE_BUTTON_COUNT; col++)
         {
             // Always erase the button area
-            drawFramebuffer(SCREEN_FILE_BROWSER_FILE_BUTTON[col].x,
+            /*drawFramebuffer(SCREEN_FILE_BROWSER_FILE_BUTTON[col].x,
                             SCREEN_FILE_BROWSER_FILE_BUTTON[col].y,
                             SCREEN_FILE_BROWSER_FILE_BUTTON[col].w,
-                            SCREEN_FILE_BROWSER_FILE_BUTTON[col].h);
+                            SCREEN_FILE_BROWSER_FILE_BUTTON[col].h);*/
 
             int fileIndex = col + (page * SCREEN_FILE_BROWSER_FILE_BUTTON_COUNT);
 
@@ -828,10 +829,10 @@ void drawScreenFileBrowser(int page)
                 break;
             case 2: // Up
                 Serial.println("Drawing over previous up button.");
-                drawFramebuffer(SCREEN_FILE_BROWSER_NAVI_BUTTON[col].x,
+                /*drawFramebuffer(SCREEN_FILE_BROWSER_NAVI_BUTTON[col].x,
                                 SCREEN_FILE_BROWSER_NAVI_BUTTON[col].y,
                                 SCREEN_FILE_BROWSER_NAVI_BUTTON[col].w,
-                                SCREEN_FILE_BROWSER_NAVI_BUTTON[col].h);
+                                SCREEN_FILE_BROWSER_NAVI_BUTTON[col].h);*/
                 if (page > 0)
                 {
                     Serial.print("Drawing up buttons because page is ");
@@ -848,10 +849,10 @@ void drawScreenFileBrowser(int page)
                 }
                 break;
             case 3: // Down
-                drawFramebuffer(SCREEN_FILE_BROWSER_NAVI_BUTTON[col].x,
+                /*drawFramebuffer(SCREEN_FILE_BROWSER_NAVI_BUTTON[col].x,
                                 SCREEN_FILE_BROWSER_NAVI_BUTTON[col].y,
                                 SCREEN_FILE_BROWSER_NAVI_BUTTON[col].w,
-                                SCREEN_FILE_BROWSER_NAVI_BUTTON[col].h);
+                                SCREEN_FILE_BROWSER_NAVI_BUTTON[col].h);*/
                 if ((page + 1) * 5 < fileListUI.listItems.size())
                 {
                     Serial.print("Drawing down button because ");
@@ -888,10 +889,10 @@ void drawScreenSend(int page)
         for (int col = 0; col < SCREEN_SEND_ADDRESSBOOK_BUTTON_COUNT; col++)
         {
             // Always erase the button area
-            drawFramebuffer(SCREEN_SEND_ADDRESSBOOK_BUTTON[col].x,
+            /*drawFramebuffer(SCREEN_SEND_ADDRESSBOOK_BUTTON[col].x,
                             SCREEN_SEND_ADDRESSBOOK_BUTTON[col].y,
                             SCREEN_SEND_ADDRESSBOOK_BUTTON[col].w,
-                            SCREEN_SEND_ADDRESSBOOK_BUTTON[col].h);
+                            SCREEN_SEND_ADDRESSBOOK_BUTTON[col].h);*/
 
             int friendIndex = col + (page * SCREEN_SEND_ADDRESSBOOK_BUTTON_COUNT);
 
@@ -929,10 +930,10 @@ void drawScreenSend(int page)
                 break;
             case 3: // Up
                 Serial.println("Drawing over previous up button.");
-                drawFramebuffer(SCREEN_SEND_NAVI_BUTTON[col].x,
+                /*drawFramebuffer(SCREEN_SEND_NAVI_BUTTON[col].x,
                                 SCREEN_SEND_NAVI_BUTTON[col].y,
                                 SCREEN_SEND_NAVI_BUTTON[col].w,
-                                SCREEN_SEND_NAVI_BUTTON[col].h);
+                                SCREEN_SEND_NAVI_BUTTON[col].h);*/
                 if (page > 0)
                 {
                     Serial.print("Drawing up buttons because page is ");
@@ -949,10 +950,10 @@ void drawScreenSend(int page)
                 }
                 break;
             case 4: // Down
-                drawFramebuffer(SCREEN_SEND_NAVI_BUTTON[col].x,
+                /*drawFramebuffer(SCREEN_SEND_NAVI_BUTTON[col].x,
                                 SCREEN_SEND_NAVI_BUTTON[col].y,
                                 SCREEN_SEND_NAVI_BUTTON[col].w,
-                                SCREEN_SEND_NAVI_BUTTON[col].h);
+                                SCREEN_SEND_NAVI_BUTTON[col].h);*/
                 if ((page + 1) * 5 < friendListUI.listItems.size())
                 {
                     SCREEN_SEND_NAVI_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
@@ -1253,7 +1254,7 @@ void cleanupUIOutOfContext(bool removeFromContext)
             if (uiButtons[i]->isDrawn)
             {
                 // Serial.print(" - DRAWING OVER");
-                drawFramebuffer(uiButtons[i]->x, uiButtons[i]->y, uiButtons[i]->w, uiButtons[i]->h);
+                //drawFramebuffer(uiButtons[i]->x, uiButtons[i]->y, uiButtons[i]->w, uiButtons[i]->h);
                 uiButtons[i]->isDrawn = false;
             }
 

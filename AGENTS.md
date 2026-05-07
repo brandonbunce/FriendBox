@@ -1,17 +1,10 @@
 # FriendBox — Agent Guide
 
-FriendBox is an ESP32-based embedded device for drawing and exchanging pixel art with friends over WiFi. Built with PlatformIO (Arduino framework) and LovyanGFX on a 480×480 touchscreen.
+The FriendBox is desk appliance to to send animations, drawings, and more to friends. Creations called "sketches". When receive message, appliance will notify by flashing the screen, prompting to remove the lid and see message. It is extended by web application with a built in viewer, social media network called "SketchWall", and drawing tool that is built within FriendBox constraints..
 
----
+Technologically, FriendBox is an ESP32 device with 480x480 LT7680-powered display, documented in `docs/`. Because of limited hardware, expected that everything fully utilizes the ESP32, no room for wasted performance or memory-leaks. LovyanGFX (similar to TFT-eSPI) handles core functions for the display. If needed, expensive tasks offload via the REST API Python server.
 
-## Quick orientation
-
-| Question | Answer |
-|---|---|
-| What does this device do? | Draw 480×480 16-color pixel art, save to SD card, send/receive via REST API |
-| What hardware runs it? | ESP32 + LT7680A graphics controller + ST7701S panel + GT911 capacitive touch |
-| How is it built? | PlatformIO (`pio run`), Arduino framework, C++17 |
-| Where are credentials? | `include/secrets.hpp` — not committed, gitignored |
+Being an appliance, stability/error handling is critical. FriendBox at release cannot have issues that would result in random crashes or lost data.
 
 ---
 
@@ -49,13 +42,12 @@ Full architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ## Key facts for agents
 
-- Canvas is **480×480 pixels**, stored as **4-bit palette indices**, packed 2-per-byte → 115,200 bytes per sketch
-- Display uses **dual SDRAM slots**: slot 0 is the live framebuffer, slot 1 is a backing store for overlay repair
-- The UI is a **single-file state machine** (`ui.cpp`, ~1,300 lines) — all screens, buttons, and dropdowns live here; refactor is tracked in tech debt
-- SD card SPI pins: CS=12, SCK=16, MISO=21, MOSI=33
-- Hall effect sensor on GPIO 15 (50 ms debounce) opens the main menu
-- NVS namespace: `"Friendbox"` — stores palette selection and other prefs
-- LT7680 documentation is available at docs/LT7680.pdf
+- Standards and expectations for FriendBox are not set in stone, please prompt for further input if things should go in another direction.
+- Drawing canvas is **480×480 pixels**, stored as **4-bit palette indices**, packed 2-per-byte → 115,200 bytes per sketch.
+- .fbox files are the main file format that are used to store sketches. They contain magic headers, metadata,  RLE-compressed frame(s), and audio. See documentation in `docs pending`
+- Frames are expected to be offloaded to the LT7680's SDRAM. It is capable of having up to ~72 slots available for our use when using 4bpp frame indices as indicated in `docs/LT7680.pdf`.
+- LovyanGFX (similar to TFT-eSPI) handles the core functions for the display. If needed and if possible, new helper functions should be implemented as extensions to already existing functions in LGFX. For example, button.drawButton() could be extended to draw using the LT7680's 2D graphics engine, reducing CPU time on the ESP32.
+- Canvas helper functions (loading frame data to a specific slot, pulling frame data from a specific slot, switching display to draw from a different slot) should all be abstracted away with extensions to LGFX. Code in `/src` shouldn't have to deal with writing to registers.
 
 ---
 

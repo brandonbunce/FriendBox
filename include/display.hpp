@@ -9,7 +9,11 @@
 #define TFT_VER_RES 480
 
 extern LGFX tft;
-extern uint16_t touchX, touchY, touchZ; // Z:0 = no touch, Z>0 = touching
+/* Tracks touch location in current tick- If Z>0 then touching. */
+extern uint16_t touchX, touchY, touchZ;
+/* Tracks touch location in previous tick. Does not reset when releasing
+touch, so check touchZ to avoid stale numbers.*/
+extern u_int16_t lastTouchX, lastTouchY;
 
 // Functions
 bool initDisplay();

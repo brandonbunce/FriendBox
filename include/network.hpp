@@ -7,6 +7,7 @@
 #include <WiFi.h>
 
 #define LOCAL_HOSTNAME "friendbox"
+#define MAX_CONNECTION_ATTEMPTS 5
 
 // Functions
 bool initNetwork(const char *netSSID, const char *netPassword, const char *hostname);

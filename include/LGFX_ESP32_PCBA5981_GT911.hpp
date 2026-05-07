@@ -105,6 +105,10 @@ public:
   {
     static_cast<lgfx::Panel_PCBA5981 *>(panel())->drawFilledRectGeo(x1, y1, x2, y2, rgb565);
   }
+  void drawFilledCircleGeo(uint16_t cx, uint16_t cy, uint16_t r, uint16_t rgb565)
+  {
+    static_cast<lgfx::Panel_PCBA5981 *>(panel())->drawFilledCircleGeo(cx, cy, r, rgb565);
+  }
   void writeRawPixels(uint16_t x, uint16_t y, uint16_t w, const uint16_t* data)
   {
     static_cast<lgfx::Panel_PCBA5981 *>(panel())->writeRawPixels(x, y, w, data);

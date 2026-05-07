@@ -225,16 +225,23 @@ void Panel_PCBA5981::setCanvasAddress(uint32_t addr)
     if (!tr) end_transaction();
 }
 
-// Filled rectangle via the Geometric Drawing Engine (datasheet section 6.3).
+// Filled rectangle via the Geometric Drawing Engine (datasheet pg. 145).
 // Programs the rectangle endpoints into REG[68h-6Fh], the foreground colour
 // into REG[D2h-D4h], then sets REG[76h] = bit7|bit6|bits[5:4]=10b which is
-// "start | fill | rectangle". Polls STSR bit3 for completion.
+// "start | fill | square". Polls STSR bit3 for completion.
 void Panel_PCBA5981::drawFilledRectGeo(uint16_t x1, uint16_t y1,
                                         uint16_t x2, uint16_t y2,
                                         uint16_t rgb565)
 {
     bool tr = _in_transaction;
     if (!tr) begin_transaction();
+
+    // The GDE clips its output against the Active Window. LovyanGFX pixel-write
+    // paths shrink the AW to a per-scanline strip via _start_memorywrite(), so
+    // unless we restore it here the engine renders into a sliver and looks
+    // like a no-op. Reference: ER-TFT040-3 demo always calls
+    // Active_Window_XY/WH(0,0,W,H) before any DrawSquare_Fill/DrawCircle_Fill.
+    _set_active_window(0, 0, timing.h_display, timing.v_display);
 
     // Foreground colour - REG[D2h] R[7:3] in bits[7:3], REG[D3h] G[7:2] in
     // bits[7:2], REG[D4h] B[7:3] in bits[7:3]. _set_forecolor handles the
@@ -247,11 +254,46 @@ void Panel_PCBA5981::drawFilledRectGeo(uint16_t x1, uint16_t y1,
     _write_reg16(0x6C, x2);   // DLHER : end   X
     _write_reg16(0x6E, y2);   // DLVER : end   Y
 
-    // DCR1 = 0xD0:
-    //   bit7=1   start
-    //   bit6=1   fill
-    //   bits[5:4]=10b   draw rectangle
-    _write_reg(0x76, 0xD0);
+    // DCR1 = 0xE0:
+    //   bit7=1          start
+    //   bit6=1          fill
+    //   bits[5:4]=10b   draw square
+    // (Earlier 0xD0 selected bits[5:4]=01 = curve, which silently did nothing.)
+    _write_reg(0x76, 0xE0);
+
+    _wait_busy();
+    _flg_memorywrite = false;
+
+    if (!tr) end_transaction();
+}
+
+// Filled circle via the Geometric Drawing Engine (datasheet pg. 145).
+// REG[7Bh/7Ch] = centre X, REG[7Dh/7Eh] = centre Y (both 13-bit).
+// REG[77h/78h] = major (X) radius, REG[79h/7Ah] = minor (Y) radius - set
+// equal for a true circle. REG[76h] DCR1:
+//   bit7=1   start
+//   bit6=1   fill
+//   bits[5:4]=00b   draw circle / ellipse
+// => kick value 0xC0. Polls STSR bit3 for completion via _wait_busy().
+void Panel_PCBA5981::drawFilledCircleGeo(uint16_t cx, uint16_t cy,
+                                          uint16_t r, uint16_t rgb565)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+
+    // GDE output is clipped to the Active Window; LovyanGFX pixel paths leave
+    // the AW pinned to a single scanline strip. Restore full canvas before
+    // the kick (matches the reference driver's pattern around DrawCircle_Fill).
+    _set_active_window(0, 0, timing.h_display, timing.v_display);
+
+    _set_forecolor(rgb565);
+
+    _write_reg16(0x7B, cx);   // ELL_X0 : centre X
+    _write_reg16(0x7D, cy);   // ELL_Y0 : centre Y
+    _write_reg16(0x77, r);    // ELL_A  : major (X) radius
+    _write_reg16(0x79, r);    // ELL_B  : minor (Y) radius
+
+    _write_reg(0x76, 0xC0);   // DCR1: start | fill | circle/ellipse
 
     _wait_busy();
     _flg_memorywrite = false;

@@ -60,7 +60,7 @@ void changeBrushSize(int targetValue);
 void setDrawColor(uint8_t colorIndex);
 /* Helper function to set background color.*/
 void setBackgroundColor(uint8_t colorIndex);
-void drawTest4();
+void drawTestPattern();
 void drawClearScreen();
 /** Draw a circle brush at x,y with given radius and color directly into the
     LT7680 SDRAM display slot. */

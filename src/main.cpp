@@ -52,18 +52,20 @@ void initFriendbox()
   {
     drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 250, "Initializing Wi-Fi", "Done!");
   }
+  else
+  {
+    drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 1000, "Initializing Wi-Fi", "Failed!  Networked functions will not work.");
+  }
   drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 0, "Initializing NVS");
   if (initNVS())
   {
     drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 500, "Initializing NVS", "Done!");
   }
   tft.fillScreen(draw_color_palette[currentDrawColorIndex]);
-  drawTestSquare();
-  delay(1000);
   if (couldInitCanvasFrameBuffer)
   {
     nvs.begin("Friendbox", true);
-    loadImageFromSD(nvs.getUInt("lastActiveSlot", 8));
+    //loadImageFromSD(nvs.getUInt("lastActiveSlot", 8));
     nvs.end();
   }
   changeScreenContext(SCREEN_CANVAS);

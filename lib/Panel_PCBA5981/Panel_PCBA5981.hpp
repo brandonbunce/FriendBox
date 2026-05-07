@@ -116,6 +116,14 @@ namespace lgfx
     void drawFilledRectGeo(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2,
                            uint16_t rgb565);
 
+    // Filled-circle draw via the Geometric Drawing Engine (datasheet pg. 145,
+    // REG[76h] DCR1). Single register kick - the chip's circle rasteriser
+    // runs in hardware, no per-row SPI traffic. The caller must ensure the
+    // bounding box fits inside the active window; off-canvas centres are not
+    // handled here.
+    void drawFilledCircleGeo(uint16_t cx, uint16_t cy, uint16_t r,
+                             uint16_t rgb565);
+
     // Write a row of native RGB565 pixels directly to the canvas, bypassing
     // the LovyanGFX pixelcopy machinery. Use this for bulk transfers where
     // the source is already in the panel's wire format (e.g. SD load path).

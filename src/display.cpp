@@ -1,15 +1,10 @@
 #include "display.hpp"
 #include "canvas.hpp"
 
-// Display
 LGFX tft;
-
-// Touch
-uint16_t touchX, touchY, touchZ; // Z:0 = no touch, Z>0 = touching
-// Stores millis() value from last recorded input.
+uint16_t touchX, touchY, touchZ;
+u_int16_t lastTouchX, lastTouchY;
 static unsigned long lastTouchTime = 0;
-/** How many "inputs" should we drop after intial touch and liftoff? */
-#define TOUCH_INPUT_BUFFER 10
 
 bool initDisplay()
 {
@@ -29,19 +24,28 @@ void handleTouch()
     if (tft.getTouch(&localTouchX, &localTouchY) && (localTouchX >= 0 && localTouchX < TFT_HOR_RES &&
                                                      localTouchY >= 0 && localTouchY < TFT_VER_RES))
     {
-        // Touching in bounds
         /*Serial.print("Touch - X: ");
-        //Serial.print(localTouchX);
-        //Serial.print(" Y: ");
-        //Serial.println(localTouchY);*/
+        Serial.print(localTouchX);
+        Serial.print(" Y: ");
+        Serial.println(localTouchY);*/
 
+        /* Place last touch coordinate into lastX/lastY for tracking movement changes. */
+        lastTouchX = touchX;
+        lastTouchY = touchY;
+
+        /* Update current touch coordinate to newest input. */
         touchX = localTouchX;
         touchY = localTouchY;
+
+        /* Mark as touching. */
         touchZ = 1;
     }
     else
     {
+        /* Stash the last time we were touching the display.*/
         lastTouchTime = millis();
+
+        /* Mark as no longer touching the display. */
         touchZ = 0;
     }
 }

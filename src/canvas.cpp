@@ -56,6 +56,7 @@ int currentRainbowPaletteIndex = 0;
 int currentBrushRadius = 5;
 int currentSaveSlot = 0;
 bool couldInitCanvasFrameBuffer = 0;
+static bool wasTouching = false;
 
 bool initCanvas() {
     // Canvas storage now lives in LT7680 SDRAM (slot 0) - see initDisplay().
@@ -66,26 +67,21 @@ bool initCanvas() {
 }
 
 // Brush stroke: fills a circle of `radius` around (x, y) with `colorIndex`.
-// Pixels are written straight to LT7680 SDRAM via tft.drawPixel; the chip
-// scans them out for "instant feedback". A snapshot to the backing slot is
-// taken on touch release in handleTouch().
+// Hardware-accelerated via the LT7680 Geometric Drawing Engine when the disc
+// fits inside the canvas; falls back to LovyanGFX's software circle (which
+// edge-clips correctly) when the brush hangs off the panel.
 void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex)
 {
     uint16_t color = draw_color_palette[colorIndex];
-    for (int dy = -radius; dy <= radius; dy++)
+    if (radius >= 0
+        && x - radius >= 0 && x + radius < TFT_HOR_RES
+        && y - radius >= 0 && y + radius < TFT_VER_RES)
     {
-        for (int dx = -radius; dx <= radius; dx++)
-        {
-            if (dx * dx + dy * dy <= radius * radius)
-            {
-                int px = x + dx;
-                int py = y + dy;
-                if (px >= 0 && px < TFT_HOR_RES && py >= 0 && py < TFT_VER_RES)
-                {
-                    tft.drawPixel(px, py, color);
-                }
-            }
-        }
+        tft.drawFilledCircleGeo((uint16_t)x, (uint16_t)y, (uint16_t)radius, color);
+    }
+    else
+    {
+        tft.fillCircle(x, y, radius, color);
     }
 }
 
@@ -110,8 +106,37 @@ void drawDitherToFB(int x, int y, int radius, uint8_t colorIndex)
     }
 }
 
+// Parametric line — stamps fn every radius/2 pixels from (x0,y0) to (x1,y1).
+// Stepping by radius/2 gives smooth coverage with far fewer fills than 1-pixel Bresenham.
+static void interpolateLine(int x0, int y0, int x1, int y1,
+                             void (*fn)(int, int, int, uint8_t),
+                             int radius, uint8_t colorIndex)
+{
+    int dx = x1 - x0, dy = y1 - y0;
+    int step = max(1, radius / 2);
+    int nsteps = max(0, (int)(sqrtf(dx * dx + dy * dy) / step));
+    for (int i = 0; i <= nsteps; i++) {
+        float t = nsteps > 0 ? (float)i / nsteps : 0.0f;
+        fn(x0 + (int)(dx * t + 0.5f), y0 + (int)(dy * t + 0.5f), radius, colorIndex);
+    }
+}
+
+// Same as interpolateLine but advances the rainbow palette index at each step.
+static void interpolateRainbow(int x0, int y0, int x1, int y1, int radius)
+{
+    int dx = x1 - x0, dy = y1 - y0;
+    int step = max(1, radius / 2);
+    int nsteps = max(0, (int)(sqrtf(dx * dx + dy * dy) / step));
+    for (int i = 0; i <= nsteps; i++) {
+        float t = nsteps > 0 ? (float)i / nsteps : 0.0f;
+        drawBrushToFB(x0 + (int)(dx * t + 0.5f), y0 + (int)(dy * t + 0.5f),
+                      radius, draw_rainbow_palette_index[currentRainbowPaletteIndex]);
+        currentRainbowPaletteIndex = (currentRainbowPaletteIndex + 1) % 7;
+    }
+}
+
 // 16 vertical colour stripes covering the whole canvas. Diagnostic only.
-void drawTest4()
+void drawTestPattern()
 {
     tft.startWrite();
     for (uint8_t i = 0; i < 16; i++)
@@ -128,38 +153,41 @@ void drawTest4()
 void drawClearScreen()
 {
     tft.fillScreen(draw_color_palette[currentDrawColorIndex]);
-    snapshotCanvas();   // commit the cleared canvas to the backing slot
 }
 
 void handleCanvasDraw()
 {
     if (currentScreen == SCREEN_CANVAS && touchZ)
     {
+        // On the first tick of a new stroke lastTouchX/Y hold stale values, so
+        // start the line at the current point instead (draws a single dot).
+        int x0 = wasTouching ? (int)lastTouchX : (int)touchX;
+        int y0 = wasTouching ? (int)lastTouchY : (int)touchY;
+
+        tft.startWrite();
         switch (currentTool)
         {
         case TOOL_PENCIL:
-            drawBrushToFB(touchX, touchY, currentBrushRadius, currentDrawColorIndex);
-            break;
         case TOOL_BRUSH:
-            drawBrushToFB(touchX, touchY, currentBrushRadius, currentDrawColorIndex);
+            interpolateLine(x0, y0, touchX, touchY, drawBrushToFB, currentBrushRadius, currentDrawColorIndex);
             break;
         case TOOL_FILL:
             drawClearScreen();
             break;
         case TOOL_RAINBOW: // Wouldn't be a bad idea to make this actually rainbow instead of cycling thru palette.... to follow ROYGBIV.
-            drawBrushToFB(touchX, touchY, currentBrushRadius, draw_rainbow_palette_index[currentRainbowPaletteIndex]);
-            currentRainbowPaletteIndex = (currentRainbowPaletteIndex + 1) % 7;
+            interpolateRainbow(x0, y0, touchX, touchY, currentBrushRadius);
             break;
         case TOOL_DITHER:
             // Oh my god. why?
-            drawDitherToFB(touchX, touchY, currentBrushRadius, currentDrawColorIndex);
+            interpolateLine(x0, y0, touchX, touchY, drawDitherToFB, currentBrushRadius, currentDrawColorIndex);
             break;
         case TOOL_STICKER:
-            drawTest4();
-            snapshotCanvas();
+            drawTestPattern();
             break;
         }
+        tft.endWrite();
     }
+    wasTouching = touchZ > 0;
 }
 
 void changeBrushSize(int targetValue)
