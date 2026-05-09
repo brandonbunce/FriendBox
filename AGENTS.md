@@ -31,7 +31,8 @@ Full architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 |---|---|---|
 | Display | [src/display.cpp](src/display.cpp), [include/display.hpp](include/display.hpp) | LovyanGFX init, touch input queue, SDRAM framebuffer slots |
 | Canvas | [src/canvas.cpp](src/canvas.cpp), [include/canvas.hpp](include/canvas.hpp) | 16-color palette, drawing tools, color quantization |
-| UI | [src/ui.cpp](src/ui.cpp), [include/ui.hpp](include/ui.hpp) | Screen state machine, button handling, menus (**needs refactor — see tech debt**) |
+| UI core | [src/ui/ui_core.cpp](src/ui/ui_core.cpp), [include/ui_core.hpp](include/ui_core.hpp) | `ScreenHandlers` registry, `changeScreenContext` dispatcher, `UIButton`, `cleanupUIOutOfContext` |
+| UI screens | [src/ui/](src/ui/) | One file per screen module; each implements `init` / `onEnter` / `draw` / `handleTouch` and registers via `screens[]` in `ui_core.cpp`. SEND and FILE_BROWSER still inline in `ui_core.cpp` pending extraction. |
 | I/O | [src/io.cpp](src/io.cpp), [include/io.hpp](include/io.hpp) | SD card, NVS preferences, Hall effect sensor |
 | Network | [src/network.cpp](src/network.cpp), [include/network.hpp](include/network.hpp) | WiFi, HTTP client, friend list API |
 | Entry point | [src/main.cpp](src/main.cpp) | Hardware init sequence, boot screen |

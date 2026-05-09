@@ -36,16 +36,6 @@ typedef enum
     SCREEN_NETWORK_SETTINGS
 } screen_id_t;
 
-/* Defines what dropdown we're in in SCREEN_CANVAS_MENU. */
-typedef enum
-{
-    DROPDOWN_NONE,
-    DROPDOWN_MENU,
-    DROPDOWN_TOOLS,
-    DROPDOWN_SAVE,
-    DROPDOWN_LOAD
-} dropdown_id_t;
-
 /**
  * @param ACT_ON_PRESS Action is executed the moment the button is pressed.
  * @param ACT_ON_HOVER_AND_RELEASE Action is executed when hovering button and then stopping touch. Make sure you add additional logic to run this another time to register release.
@@ -68,20 +58,54 @@ typedef enum
 
 extern screen_id_t currentScreen;
 extern screen_id_t lastScreen; // Used by drawFriendboxLoadingScreen to return to previous context after showing loading screen.
-extern dropdown_id_t currentDropdown;
 
+/**
+ * UIButton::subcontext is a screen-private discriminator (typically a screen-local enum cast to int).
+ * Convention: 0 = "always visible on this screen"; any nonzero value means the button is only
+ * visible when the screen's activeSubcontext() returns the same value.
+ * This lets each screen own its own subcontext type (dropdowns, sort modes, confirm states, ...)
+ * without leaking the type into ui_core.
+ */
 struct UIButton
 {
     LGFX_Button button;
     int x, y, w, h;
     bool isDrawn = false;
     screen_id_t screenContext;
-    dropdown_id_t dropdownContext = DROPDOWN_NONE;
+    int subcontext = 0;
     int fillColor;
 };
 
 extern std::vector<UIButton *> uiButtons;
 extern UIButton *lastPressedButton;
+
+/**
+ * Per-screen behavior table. One entry per screen_id_t value.
+ * - implemented: false → log critical and abort the transition (matches the legacy default branch).
+ * - preservePriorUI: true → cleanupUIOutOfContext(false) on entry (used by transient overlays like SCREEN_SYSTEM_MESSAGE).
+ * - init/onEnter/draw/handleTouch: optional (nullptr to skip).
+ *   - init runs once (dedupe-guarded by checkIfUIIsInitialized) to build LGFX_Buttons.
+ *   - onEnter runs every transition into the screen, before draw — for state resets (page=0, dropdown=NONE, etc.).
+ *   - draw paints the screen.
+ *   - handleTouch is called every frame from handleTouchUIUpdate.
+ * - activeSubcontext: optional. If set, returns the screen's currently active subcontext value
+ *   (e.g. open dropdown, current sort mode). cleanupUIOutOfContext uses it to filter buttons
+ *   whose `subcontext` is nonzero — only buttons matching the active subcontext stay visible.
+ *   Leave nullptr if the screen has no subcontext model.
+ */
+struct ScreenHandlers
+{
+    const char *name;
+    bool implemented;
+    bool preservePriorUI;
+    void (*init)();
+    void (*onEnter)();
+    void (*draw)();
+    void (*handleTouch)();
+    int (*activeSubcontext)();
+};
+
+extern const ScreenHandlers screens[];
 
 // Functions
 /** Check if UI is already initialized for a given screen context. If it's not, initialize it.

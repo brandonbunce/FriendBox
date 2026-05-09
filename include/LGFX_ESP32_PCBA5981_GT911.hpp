@@ -152,4 +152,11 @@ public:
   {
     static_cast<lgfx::Panel_PCBA5981 *>(panel())->setMainImageAddress(addr);
   }
+  void blitFrames(uint32_t src_addr, uint16_t src_x, uint16_t src_y,
+                  uint32_t dst_addr, uint16_t dst_x, uint16_t dst_y,
+                  uint16_t w, uint16_t h)
+  {
+    static_cast<lgfx::Panel_PCBA5981 *>(panel())->blitFrames(
+        src_addr, src_x, src_y, dst_addr, dst_x, dst_y, w, h);
+  }
 };

@@ -105,6 +105,26 @@ void canvasDrawDither(int x, int y, int radius, uint8_t colorIndex)
     }
 }
 
+// 16 vertical colour stripes covering the whole canvas. Diagnostic only.
+void canvasDrawTestPattern()
+{
+    tft.startWrite();
+    for (uint8_t i = 0; i < 16; i++)
+    {
+        // Each stripe is 32 pixels wide (480 / 16 = 30 - close enough; the
+        // (x>>5) version produced 15 full + 1 short stripe, keep that vibe).
+        int x0 = i * 32;
+        int w = (i == 15) ? (TFT_HOR_RES - x0) : 32;
+        tft.fillRectGPU(x0, 0, x0 + w - 1, TFT_VER_RES - 1, draw_color_palette[i]);
+    }
+    tft.endWrite();
+}
+
+void canvasFillScreen()
+{
+    tft.fillScreen(draw_color_palette[currentDrawColorIndex]);
+}
+
 // Parametric line — stamps fn every radius/2 pixels from (x0,y0) to (x1,y1).
 // Stepping by radius/2 gives smooth coverage with far fewer fills than 1-pixel Bresenham.
 static void interpolateLine(int x0, int y0, int x1, int y1,
@@ -136,26 +156,6 @@ static void interpolateRainbow(int x0, int y0, int x1, int y1, int radius)
     }
 }
 
-// 16 vertical colour stripes covering the whole canvas. Diagnostic only.
-void drawTestPattern()
-{
-    tft.startWrite();
-    for (uint8_t i = 0; i < 16; i++)
-    {
-        // Each stripe is 32 pixels wide (480 / 16 = 30 - close enough; the
-        // (x>>5) version produced 15 full + 1 short stripe, keep that vibe).
-        int x0 = i * 32;
-        int w = (i == 15) ? (TFT_HOR_RES - x0) : 32;
-        tft.fillRectGPU(x0, 0, w, TFT_VER_RES, draw_color_palette[i]);
-    }
-    tft.endWrite();
-}
-
-void drawClearScreen()
-{
-    tft.fillScreen(draw_color_palette[currentDrawColorIndex]);
-}
-
 void handleCanvasDraw()
 {
     if (currentScreen == SCREEN_CANVAS && touchZ)
@@ -175,7 +175,7 @@ void handleCanvasDraw()
             interpolateLine(x0, y0, touchX, touchY, canvasDrawBrush, currentBrushRadius, currentDrawColorIndex);
             break;
         case TOOL_FILL:
-            drawClearScreen();
+            canvasFillScreen();
             break;
         case TOOL_RAINBOW: // Wouldn't be a bad idea to make this actually rainbow instead of cycling thru palette.... to follow ROYGBIV.
             interpolateRainbow(x0, y0, touchX, touchY, currentBrushRadius);
@@ -185,7 +185,7 @@ void handleCanvasDraw()
             interpolateLine(x0, y0, touchX, touchY, canvasDrawDither, currentBrushRadius, currentDrawColorIndex);
             break;
         case TOOL_STICKER:
-            drawTestPattern();
+            canvasDrawTestPattern();
             break;
         }
         tft.endWrite();
@@ -193,7 +193,7 @@ void handleCanvasDraw()
     wasTouching = touchZ > 0;
 }
 
-void changeBrushSize(int targetValue)
+void setBrushSize(int targetValue)
 {
     if (targetValue > 0 && targetValue <= 100)
     {

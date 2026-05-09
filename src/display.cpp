@@ -15,6 +15,8 @@ bool initDisplay()
     tft.setRotation(3); // This option enables suffering. Don't forget to account for coordinate translation!
     tft.setBrightness(255);
     tft.setColorDepth(16);
+    //tft.setFont(&DejaVu9);
+
     return true;
 }
 

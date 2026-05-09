@@ -55,13 +55,13 @@ extern bool couldInitCanvasFrameBuffer;
 // Functions
 bool initCanvas();
 /* Change brush size while keeping brush size above 0.*/
-void changeBrushSize(int targetValue);
+void setBrushSize(int targetValue);
 /* Helper function to set draw color.*/
 void setDrawColor(uint8_t colorIndex);
 /* Helper function to set background color.*/
 void setBackgroundColor(uint8_t colorIndex);
-void drawTestPattern();
-void drawClearScreen();
+void canvasDrawTestPattern();
+void canvasFillScreen();
 /** Draw a circle brush at x,y with given radius and color directly into the
     LT7680 SDRAM display slot. */
 void canvasDrawBrush(int x, int y, int radius, uint8_t colorIndex);
