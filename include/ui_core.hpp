@@ -1,32 +1,11 @@
 // MUST REFACTOR THE LEGACY UI MONOLITH!!!
-#ifndef UI_HPP
-#define UI_HPP
+#ifndef UI_CORE_HPP
+#define UI_CORE_HPP
 
 #include <Arduino.h>
 #include <vector>
 #include <Preferences.h>
 #include <LovyanGFX.h>
-
-#define SCREEN_CANVAS_UI_ACTION_BAR_DIST_FROM_TOP_PX 5
-#define SCREEN_CANVAS_UI_ACTION_BAR_HEIGHT 50
-#define SCREEN_CANVAS_UI_ACTION_BAR_ITEM_WIDTH_PX 110
-#define SCREEN_CANVAS_UI_ACTION_BAR_ITEM_HEIGHT_PX 25
-#define SCREEN_CANVAS_UI_ACTION_BUTTON_SPACING ((TFT_HOR_RES - (SCREEN_CANVAS_UI_ACTION_BUTTON_COUNT * SCREEN_CANVAS_UI_ACTION_BAR_ITEM_WIDTH_PX)) / (SCREEN_CANVAS_UI_ACTION_BUTTON_COUNT + 1))
-#define SCREEN_CANVAS_UI_ACTION_BUTTON_X_POS(col) (SCREEN_CANVAS_UI_ACTION_BUTTON_SPACING + ((col) * (SCREEN_CANVAS_UI_ACTION_BAR_ITEM_WIDTH_PX + SCREEN_CANVAS_UI_ACTION_BUTTON_SPACING)))
-#define SCREEN_CANVAS_UI_ACTION_BUTTON_COUNT 4
-
-#define SCREEN_CANVAS_UI_COLOR_BAR_DIST_FROM_BOTTOM_PX 5
-#define SCREEN_CANVAS_UI_COLOR_BAR_ITEM_HEIGHT_PX 50
-#define SCREEN_CANVAS_UI_COLOR_BAR_ITEM_WIDTH_PX 27
-#define SCREEN_CANVAS_UI_COLOR_BUTTON_SPACING ((TFT_HOR_RES - (16 * SCREEN_CANVAS_UI_COLOR_BAR_ITEM_WIDTH_PX)) / 16)
-#define SCREEN_CANVAS_UI_COLOR_BUTTON_X_POS(col) (SCREEN_CANVAS_UI_COLOR_BUTTON_SPACING + ((col) * (SCREEN_CANVAS_UI_COLOR_BAR_ITEM_WIDTH_PX + SCREEN_CANVAS_UI_COLOR_BUTTON_SPACING)))
-#define SCREEN_CANVAS_UI_COLOR_BUTTON_COUNT 16 // This should technically be static at 16 due to 4-bit color.
-
-#define CANVAS_DRAW_MENU_DROPDOWN_DIST_BETWEEN_ITEMS 5
-#define TOOL_DROPDOWN_BUTTON_COUNT 6
-#define SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON_COUNT 6
-#define MENU_DROPDOWN_BUTTON_COUNT 5
-#define SLOT_DROPDOWN_BUTTON_COUNT 7
 
 /* SCREEN_SEND */
 #define SCREEN_SEND_ADDRESSBOOK_BUTTON_COUNT 5
@@ -101,12 +80,14 @@ struct UIButton
     int fillColor;
 };
 
+extern std::vector<UIButton *> uiButtons;
+extern UIButton *lastPressedButton;
+
 // Functions
 /** Check if UI is already initialized for a given screen context. If it's not, initialize it.
  * @param targetScreen The screen context we want to check for initialization and initialize if not already.
  */
 void initUIForScreen(screen_id_t targetScreen);
-void drawScreenCanvasMenu();
 /**
  * Draw
  * @param page Starting from zero, show which "page" of friends we're showing in the address book. Each page shows 5 friends, so page 0 shows friends 0-4, page 1 shows friends 5-9, etc.

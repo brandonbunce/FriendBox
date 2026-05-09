@@ -1,7 +1,7 @@
 #include "io.hpp"
 #include "display.hpp"
 #include "canvas.hpp"
-#include "ui.hpp"
+#include "ui_core.hpp"
 
 Preferences nvs; // https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/storage/nvs_flash.html
 SPIClass sdspi = SPIClass(HSPI);

@@ -101,13 +101,44 @@ public:
 
   // Expose Panel_PCBA5981-specific hardware drawing so callers can use tft.xxx()
   // without needing to cast tft.panel() themselves.
-  void drawFilledRectGeo(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint16_t rgb565)
+  //
+  // These wrappers accept signed coordinates and clip / skip as needed before
+  // handing off to the panel methods (which require valid 13-bit unsigned
+  // values - the LT7680's coordinate registers are 13 bits wide and a negative
+  // input would wrap into the addressable space). Direct callers of
+  // panel()->fillRectGPU / fillCircleGPU still have to obey that contract.
+  void fillRectGPU(int32_t x1, int32_t y1, int32_t x2, int32_t y2, uint16_t rgb565)
   {
-    static_cast<lgfx::Panel_PCBA5981 *>(panel())->drawFilledRectGeo(x1, y1, x2, y2, rgb565);
+    if (x1 > x2) std::swap(x1, x2);
+    if (y1 > y2) std::swap(y1, y2);
+    int32_t w = width();
+    int32_t h = height();
+    if (x2 < 0 || y2 < 0 || x1 >= w || y1 >= h) return;
+    if (x1 < 0)     x1 = 0;
+    if (y1 < 0)     y1 = 0;
+    if (x2 >= w)    x2 = w - 1;
+    if (y2 >= h)    y2 = h - 1;
+    static_cast<lgfx::Panel_PCBA5981 *>(panel())->fillRectGPU(
+        (uint16_t)x1, (uint16_t)y1, (uint16_t)x2, (uint16_t)y2, rgb565);
   }
-  void drawFilledCircleGeo(uint16_t cx, uint16_t cy, uint16_t r, uint16_t rgb565)
+  void fillCircleGPU(int32_t cx, int32_t cy, int32_t r, uint16_t rgb565)
   {
-    static_cast<lgfx::Panel_PCBA5981 *>(panel())->drawFilledCircleGeo(cx, cy, r, rgb565);
+    if (r < 0) return;
+    int32_t w = width();
+    int32_t h = height();
+    // Bounding box doesn't intersect the canvas - skip the kick entirely.
+    if (cx + r < 0 || cy + r < 0 || cx - r >= w || cy - r >= h) return;
+    // Top/left overhang would cause 13-bit underflow in the rasteriser's
+    // pixel-address math; the chip's Active Window clipper might still drop
+    // the wrapped pixels but it's unverified, so use the software path.
+    // Right/bottom overhang is fine - the AW clip handles it cleanly.
+    if (cx - r < 0 || cy - r < 0)
+    {
+      fillCircle(cx, cy, r, rgb565);
+      return;
+    }
+    static_cast<lgfx::Panel_PCBA5981 *>(panel())->fillCircleGPU(
+        (uint16_t)cx, (uint16_t)cy, (uint16_t)r, rgb565);
   }
   void writeRawPixels(uint16_t x, uint16_t y, uint16_t w, const uint16_t* data)
   {

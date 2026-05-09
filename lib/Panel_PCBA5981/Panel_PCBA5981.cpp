@@ -221,6 +221,7 @@ void Panel_PCBA5981::setCanvasAddress(uint32_t addr)
     bool tr = _in_transaction;
     if (!tr) begin_transaction();
     _write_reg32(0x50, addr);   // CVSSA: Canvas Start Address
+    _canvas_addr = addr;        // mirror so BTE source/dest registers follow
     _flg_memorywrite = false;   // force active-window reload on next access
     if (!tr) end_transaction();
 }
@@ -229,7 +230,7 @@ void Panel_PCBA5981::setCanvasAddress(uint32_t addr)
 // Programs the rectangle endpoints into REG[68h-6Fh], the foreground colour
 // into REG[D2h-D4h], then sets REG[76h] = bit7|bit6|bits[5:4]=10b which is
 // "start | fill | square". Polls STSR bit3 for completion.
-void Panel_PCBA5981::drawFilledRectGeo(uint16_t x1, uint16_t y1,
+void Panel_PCBA5981::fillRectGPU(uint16_t x1, uint16_t y1,
                                         uint16_t x2, uint16_t y2,
                                         uint16_t rgb565)
 {
@@ -275,7 +276,7 @@ void Panel_PCBA5981::drawFilledRectGeo(uint16_t x1, uint16_t y1,
 //   bit6=1   fill
 //   bits[5:4]=00b   draw circle / ellipse
 // => kick value 0xC0. Polls STSR bit3 for completion via _wait_busy().
-void Panel_PCBA5981::drawFilledCircleGeo(uint16_t cx, uint16_t cy,
+void Panel_PCBA5981::fillCircleGPU(uint16_t cx, uint16_t cy,
                                           uint16_t r, uint16_t rgb565)
 {
     bool tr = _in_transaction;
@@ -797,11 +798,13 @@ void Panel_PCBA5981::writeFillRectPreclipped(uint_fast16_t x, uint_fast16_t y,
     }
 
     // BTE Solid Fill (operation 0x0C in REG[91h] low nibble).
+    // Destination address tracks the active canvas (CVSSA mirror) so that
+    // fills land in whatever slot setCanvasAddress() most recently selected.
     _set_forecolor(rawcolor);
     _write_reg(0x91, 0xCC);
     _write_reg(0x92, 0x01);
 
-    _write_reg32(0xA7, CANVAS_BASE_ADDR);
+    _write_reg32(0xA7, _canvas_addr);
     _write_reg16(0xAB, (uint16_t)timing.h_display);
     _write_reg16(0xAD, (uint16_t)x);
     _write_reg16(0xAF, (uint16_t)y);
@@ -920,12 +923,14 @@ void Panel_PCBA5981::copyRect(uint_fast16_t dst_x, uint_fast16_t dst_y,
     _write_reg(0x91, (uint8_t)(0xC0 | (positive ? 0x02 : 0x03)));
     _write_reg(0x92, 0x21);
 
-    _write_reg32(0x93, CANVAS_BASE_ADDR);
+    // Both source and destination resolve to the active canvas; copyRect()
+    // is an in-canvas blit. Cross-slot copies go through blitFrames().
+    _write_reg32(0x93, _canvas_addr);
     _write_reg16(0x97, (uint16_t)timing.h_display);
     _write_reg16(0x99, (uint16_t)src_x);
     _write_reg16(0x9B, (uint16_t)src_y);
 
-    _write_reg32(0xA7, CANVAS_BASE_ADDR);
+    _write_reg32(0xA7, _canvas_addr);
     _write_reg16(0xAB, (uint16_t)timing.h_display);
     _write_reg16(0xAD, (uint16_t)dst_x);
     _write_reg16(0xAF, (uint16_t)dst_y);

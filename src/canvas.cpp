@@ -1,6 +1,6 @@
 #include "canvas.hpp"
 #include "display.hpp"
-#include "ui.hpp"
+#include "ui_core.hpp"
 
 uint16_t draw_color_palette[16] = {
     0x0000, // Black (0)
@@ -58,7 +58,8 @@ int currentSaveSlot = 0;
 bool couldInitCanvasFrameBuffer = 0;
 static bool wasTouching = false;
 
-bool initCanvas() {
+bool initCanvas()
+{
     // Canvas storage now lives in LT7680 SDRAM (slot 0) - see initDisplay().
     // No ESP32 allocation needed. Kept as a distinct init step in case canvas
     // bookkeeping needs to grow back later.
@@ -67,25 +68,24 @@ bool initCanvas() {
 }
 
 // Brush stroke: fills a circle of `radius` around (x, y) with `colorIndex`.
-// Hardware-accelerated via the LT7680 Geometric Drawing Engine when the disc
-// fits inside the canvas; falls back to LovyanGFX's software circle (which
-// edge-clips correctly) when the brush hangs off the panel.
-void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex)
+// Hardware-accelerated via the LT7680 Geometric Drawing Engine. The LGFX
+// wrapper handles off-canvas clipping (and falls back to software for top/left
+// overhang), so callers can pass raw touch coordinates.
+void canvasDrawBrush(int x, int y, int radius, uint8_t colorIndex)
 {
-    uint16_t color = draw_color_palette[colorIndex];
-    if (radius >= 0
-        && x - radius >= 0 && x + radius < TFT_HOR_RES
-        && y - radius >= 0 && y + radius < TFT_VER_RES)
-    {
-        tft.drawFilledCircleGeo((uint16_t)x, (uint16_t)y, (uint16_t)radius, color);
-    }
-    else
-    {
-        tft.fillCircle(x, y, radius, color);
-    }
+    tft.fillCircleGPU(x, y, radius, draw_color_palette[colorIndex]);
 }
 
-void drawDitherToFB(int x, int y, int radius, uint8_t colorIndex)
+// Pencil stamp: square of side 2*radius+1 centred on (x, y). Same `radius`
+// semantics as the brush so the two tools produce visually comparable stamp
+// sizes for the same brush-size setting.
+void canvasDrawPencil(int x, int y, int radius, uint8_t colorIndex)
+{
+    tft.fillRectGPU(x - radius, y - radius, x + radius, y + radius,
+                    draw_color_palette[colorIndex]);
+}
+
+void canvasDrawDither(int x, int y, int radius, uint8_t colorIndex)
 {
     uint16_t color = draw_color_palette[colorIndex];
     for (int dy = -radius; dy <= radius; dy++)
@@ -96,8 +96,7 @@ void drawDitherToFB(int x, int y, int radius, uint8_t colorIndex)
             {
                 int px = x + dx;
                 int py = y + dy;
-                if ((px % 2 == 0) && (py % 2 == 0)
-                    && px >= 0 && px < TFT_HOR_RES && py >= 0 && py < TFT_VER_RES)
+                if ((px % 2 == 0) && (py % 2 == 0) && px >= 0 && px < TFT_HOR_RES && py >= 0 && py < TFT_VER_RES)
                 {
                     tft.drawPixel(px, py, color);
                 }
@@ -109,13 +108,14 @@ void drawDitherToFB(int x, int y, int radius, uint8_t colorIndex)
 // Parametric line — stamps fn every radius/2 pixels from (x0,y0) to (x1,y1).
 // Stepping by radius/2 gives smooth coverage with far fewer fills than 1-pixel Bresenham.
 static void interpolateLine(int x0, int y0, int x1, int y1,
-                             void (*fn)(int, int, int, uint8_t),
-                             int radius, uint8_t colorIndex)
+                            void (*fn)(int, int, int, uint8_t),
+                            int radius, uint8_t colorIndex)
 {
     int dx = x1 - x0, dy = y1 - y0;
     int step = max(1, radius / 2);
     int nsteps = max(0, (int)(sqrtf(dx * dx + dy * dy) / step));
-    for (int i = 0; i <= nsteps; i++) {
+    for (int i = 0; i <= nsteps; i++)
+    {
         float t = nsteps > 0 ? (float)i / nsteps : 0.0f;
         fn(x0 + (int)(dx * t + 0.5f), y0 + (int)(dy * t + 0.5f), radius, colorIndex);
     }
@@ -127,10 +127,11 @@ static void interpolateRainbow(int x0, int y0, int x1, int y1, int radius)
     int dx = x1 - x0, dy = y1 - y0;
     int step = max(1, radius / 2);
     int nsteps = max(0, (int)(sqrtf(dx * dx + dy * dy) / step));
-    for (int i = 0; i <= nsteps; i++) {
+    for (int i = 0; i <= nsteps; i++)
+    {
         float t = nsteps > 0 ? (float)i / nsteps : 0.0f;
-        drawBrushToFB(x0 + (int)(dx * t + 0.5f), y0 + (int)(dy * t + 0.5f),
-                      radius, draw_rainbow_palette_index[currentRainbowPaletteIndex]);
+        canvasDrawBrush(x0 + (int)(dx * t + 0.5f), y0 + (int)(dy * t + 0.5f),
+                        radius, draw_rainbow_palette_index[currentRainbowPaletteIndex]);
         currentRainbowPaletteIndex = (currentRainbowPaletteIndex + 1) % 7;
     }
 }
@@ -144,8 +145,8 @@ void drawTestPattern()
         // Each stripe is 32 pixels wide (480 / 16 = 30 - close enough; the
         // (x>>5) version produced 15 full + 1 short stripe, keep that vibe).
         int x0 = i * 32;
-        int w  = (i == 15) ? (TFT_HOR_RES - x0) : 32;
-        tft.fillRect(x0, 0, w, TFT_VER_RES, draw_color_palette[i]);
+        int w = (i == 15) ? (TFT_HOR_RES - x0) : 32;
+        tft.fillRectGPU(x0, 0, w, TFT_VER_RES, draw_color_palette[i]);
     }
     tft.endWrite();
 }
@@ -168,8 +169,10 @@ void handleCanvasDraw()
         switch (currentTool)
         {
         case TOOL_PENCIL:
+            interpolateLine(x0, y0, touchX, touchY, canvasDrawPencil, currentBrushRadius, currentDrawColorIndex);
+            break;
         case TOOL_BRUSH:
-            interpolateLine(x0, y0, touchX, touchY, drawBrushToFB, currentBrushRadius, currentDrawColorIndex);
+            interpolateLine(x0, y0, touchX, touchY, canvasDrawBrush, currentBrushRadius, currentDrawColorIndex);
             break;
         case TOOL_FILL:
             drawClearScreen();
@@ -179,7 +182,7 @@ void handleCanvasDraw()
             break;
         case TOOL_DITHER:
             // Oh my god. why?
-            interpolateLine(x0, y0, touchX, touchY, drawDitherToFB, currentBrushRadius, currentDrawColorIndex);
+            interpolateLine(x0, y0, touchX, touchY, canvasDrawDither, currentBrushRadius, currentDrawColorIndex);
             break;
         case TOOL_STICKER:
             drawTestPattern();

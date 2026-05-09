@@ -5,7 +5,7 @@
 #include "display.hpp"
 #include "io.hpp"
 #include "network.hpp"
-#include "ui.hpp"
+#include "ui_core.hpp"
 
 // (C) 2025-2026 Brandon Bunce - FriendBox System Software
 #define FRIENDBOX_DEBUG_MODE true
@@ -61,7 +61,7 @@ void initFriendbox()
   {
     drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 500, "Initializing NVS", "Done!");
   }
-  tft.fillScreen(draw_color_palette[currentDrawColorIndex]);
+  tft.fillScreen(draw_color_palette_text_color[currentDrawColorIndex]);
   if (couldInitCanvasFrameBuffer)
   {
     nvs.begin("Friendbox", true);
@@ -69,6 +69,7 @@ void initFriendbox()
     nvs.end();
   }
   changeScreenContext(SCREEN_CANVAS);
+  tft.fillRectGPU(20, 20, 90, 90, draw_color_palette[5]);
 }
 
 void setup()

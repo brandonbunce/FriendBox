@@ -113,7 +113,7 @@ namespace lgfx
     // Filled-rectangle draw via the Geometric Drawing Engine (datasheet
     // section 6.3). Single REG[76h] kick - the chip rasterises in hardware,
     // no per-pixel SPI traffic. Coordinates are in canvas pixel space.
-    void drawFilledRectGeo(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2,
+    void fillRectGPU(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2,
                            uint16_t rgb565);
 
     // Filled-circle draw via the Geometric Drawing Engine (datasheet pg. 145,
@@ -121,7 +121,7 @@ namespace lgfx
     // runs in hardware, no per-row SPI traffic. The caller must ensure the
     // bounding box fits inside the active window; off-canvas centres are not
     // handled here.
-    void drawFilledCircleGeo(uint16_t cx, uint16_t cy, uint16_t r,
+    void fillCircleGPU(uint16_t cx, uint16_t cy, uint16_t r,
                              uint16_t rgb565);
 
     // Write a row of native RGB565 pixels directly to the canvas, bypassing
@@ -164,6 +164,12 @@ namespace lgfx
     uint16_t _win_ye          = 479;
     bool     _in_transaction  = false;
     bool     _flg_memorywrite = false;
+
+    // Mirror of REG[50h] CVSSA (Canvas Start Address). All BTE source/dest
+    // and GDE-clipped fills must read from here so that draws follow whatever
+    // SDRAM slot setCanvasAddress() last selected. Hardcoding the base address
+    // (slot 0) makes setCanvasAddress() a no-op for fill rects and copyRect.
+    uint32_t _canvas_addr = 0;
 
     const uint8_t* getInitCommands(uint8_t listno) const override { return nullptr; }
 

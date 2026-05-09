@@ -64,8 +64,8 @@ void drawTestPattern();
 void drawClearScreen();
 /** Draw a circle brush at x,y with given radius and color directly into the
     LT7680 SDRAM display slot. */
-void drawBrushToFB(int x, int y, int radius, uint8_t colorIndex);
-void drawDitherToFB(int x, int y, int radius, uint8_t colorIndex);
+void canvasDrawBrush(int x, int y, int radius, uint8_t colorIndex);
+void canvasDrawDither(int x, int y, int radius, uint8_t colorIndex);
 /** Draw to screen if within canvas context! */
 void handleCanvasDraw();
 
