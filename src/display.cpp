@@ -1,5 +1,6 @@
 #include "display.hpp"
 #include "canvas.hpp"
+#include <Panel_PCBA5981.hpp>
 
 LGFX tft;
 uint16_t touchX, touchY, touchZ;
@@ -10,14 +11,173 @@ bool initDisplay()
 {
     if (!tft.init())
     {
+        Serial.println("[DISPLAY] tft.init() FAILED");
         return false;
     }
+    Serial.println("[DISPLAY] tft.init() OK");
     tft.setRotation(3); // This option enables suffering. Don't forget to account for coordinate translation!
     tft.setBrightness(255);
-    tft.setColorDepth(16);
+    tft.setColorDepth(8);
     //tft.setFont(&DejaVu9);
 
     return true;
+}
+
+static lgfx::Panel_PCBA5981* pcba_panel()
+{
+    return static_cast<lgfx::Panel_PCBA5981*>(tft.getPanel());
+}
+
+void displayWriteScanline(int x, int y, int w, const uint16_t* data)
+{
+    pcba_panel()->writeRawPixels(x, y, w, data);
+}
+
+void displayFrameBegin() { tft.startWrite(); }
+void displayFrameEnd()   { tft.endWrite();   }
+
+static bool _anim_slot_b = false;
+
+void displayAnimFrameBegin()
+{
+    uint32_t back = _anim_slot_b ? LT7680_SLOT_ANIM_B : LT7680_SLOT_ANIM;
+    tft.startWrite();
+    pcba_panel()->setCanvasAddress(back);
+}
+
+void displayAnimWriteFrame(const uint8_t* clut8)
+{
+    pcba_panel()->writeRawFrame8bpp(clut8, (uint32_t)TFT_HOR_RES * TFT_VER_RES);
+}
+
+void displayAnimFrameEnd()
+{
+    uint32_t back = _anim_slot_b ? LT7680_SLOT_ANIM_B : LT7680_SLOT_ANIM;
+    pcba_panel()->setMainImageAddress(back);
+    pcba_panel()->waitVSync();
+    _anim_slot_b = !_anim_slot_b;
+    pcba_panel()->setCanvasAddress(LT7680_SLOT_CANVAS);
+    tft.endWrite();
+}
+
+// BTE fill threshold: runs shorter than this are batched with adjacent literals
+// for a single raw write. Break-even is ~5 pixels; 8 gives comfortable margin.
+static constexpr int BTE_RUN_THRESHOLD = 8;
+
+void displayWriteScanlineSpanned(int y, const uint16_t* pixels, int w)
+{
+    auto* panel = pcba_panel();
+    int x = 0;
+    while (x < w) {
+        // Measure run of same-color pixels starting at x
+        uint16_t col = pixels[x];
+        int run_end = x + 1;
+        while (run_end < w && pixels[run_end] == col) run_end++;
+        int run_len = run_end - x;
+
+        if (run_len >= BTE_RUN_THRESHOLD) {
+            // BTE hardware fill — no per-pixel SPI traffic
+            panel->writeFillRectPreclipped(x, y, run_len, 1, (uint32_t)col);
+            x = run_end;
+        } else {
+            // Collect consecutive pixels up to the next BTE-worthy run
+            int lit_end = run_end;
+            while (lit_end < w) {
+                uint16_t c2 = pixels[lit_end];
+                int r2 = lit_end + 1;
+                while (r2 < w && pixels[r2] == c2) r2++;
+                if (r2 - lit_end >= BTE_RUN_THRESHOLD) break;
+                lit_end = r2;
+            }
+            // Write the whole literal segment in one raw burst
+            panel->writeRawPixels(x, y, lit_end - x, pixels + x);
+            x = lit_end;
+        }
+    }
+}
+
+//============================================================================
+// Serial Flash animation API
+//============================================================================
+
+uint32_t displayFlashReadJEDECID(void)
+{
+    tft.startWrite();
+    uint32_t id = pcba_panel()->flashReadJEDECID();
+    tft.endWrite();
+    return id;
+}
+
+void displayFlashErase(uint32_t start_addr, uint32_t len)
+{
+    uint32_t addr = start_addr & ~0xFFFu;  // align down to 4 KB sector
+    uint32_t end  = start_addr + len;
+    Serial.printf("[FLASH] Erase range 0x%06X–0x%06X (%lu sectors)\n",
+                  addr, end, (end - addr + 0xFFF) / 0x1000);
+    tft.startWrite();
+    while (addr < end) {
+        pcba_panel()->flashEraseSector(addr);
+        addr += 0x1000;
+    }
+    tft.endWrite();
+}
+
+static inline uint8_t _rgb565_to_clut8(uint16_t c)
+{
+    return (uint8_t)(((c >> 13) & 0x07) << 5 |
+                     ((c >>  8) & 0x07) << 2 |
+                     ((c >>  3) & 0x03));
+}
+
+void displayFlashWriteFrame(uint16_t frame_idx, uint16_t w, uint16_t h,
+                             const uint16_t* pixels)
+{
+    uint32_t n_pixels   = (uint32_t)w * h;
+    uint32_t frame_bytes = n_pixels;              // 8bpp: 1 byte per pixel
+    uint32_t start_addr  = (uint32_t)frame_idx * frame_bytes;
+
+    Serial.printf("[FLASH] Write frame %u  addr=0x%06X  %u×%u  %lu bytes\n",
+                  frame_idx, start_addr, w, h, frame_bytes);
+
+    displayFlashErase(start_addr, frame_bytes);
+
+    tft.startWrite();
+    uint8_t page_buf[256];
+    uint32_t pix_done = 0;
+    while (pix_done < n_pixels) {
+        uint16_t chunk = (uint16_t)((n_pixels - pix_done) > 256
+                                     ? 256
+                                     : (n_pixels - pix_done));
+        for (uint16_t i = 0; i < chunk; i++)
+            page_buf[i] = _rgb565_to_clut8(pixels[pix_done + i]);
+        pcba_panel()->flashPageProgram(start_addr + pix_done, page_buf, chunk);
+        pix_done += chunk;
+    }
+    tft.endWrite();
+
+    Serial.printf("[FLASH] Frame %u write complete\n", frame_idx);
+}
+
+void displayFlashPlayFrame(uint16_t frame_idx, uint16_t w, uint16_t h)
+{
+    uint32_t frame_bytes = (uint32_t)w * h;       // 8bpp: 1 byte per pixel
+    uint32_t flash_addr  = (uint32_t)frame_idx * frame_bytes;
+
+    // Ping-pong: DMA into whichever slot is not currently displayed,
+    // then page-flip. Prevents scanlines from writing into the active frame.
+    static bool use_b = false;
+    uint32_t back = use_b ? LT7680_SLOT_ANIM_B : LT7680_SLOT_ANIM;
+
+    Serial.printf("[ANIM] Play frame %u  flash=0x%06X  back=0x%08X\n",
+                  frame_idx, flash_addr, back);
+
+    tft.startWrite();
+    pcba_panel()->dmaFlashBlock(flash_addr, w, back, 0, 0, w, h);
+    pcba_panel()->waitVSync();
+    pcba_panel()->setMainImageAddress(back);
+    tft.endWrite();
+
+    use_b = !use_b;
 }
 
 void handleTouch()

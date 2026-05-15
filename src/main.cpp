@@ -17,7 +17,6 @@ bool initNVS();
 void initFriendbox()
 {
   currentDrawColorIndex = 0 + (esp_random() % (15 - 0 + 1));
-
   initDisplay();
   drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 0, "Initializing SD");
   if (initSD(false))
@@ -69,7 +68,23 @@ void initFriendbox()
     nvs.end();
   }
   changeScreenContext(SCREEN_CANVAS);
-  tft.fillRectGPU(20, 20, 90, 90, draw_color_palette[5]);
+}
+
+static void playSketchFromServer(const char *sketch_id)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/sketches/received/%s.fbox", sketch_id);
+    SD.mkdir("/sketches/received");
+    if (!SD.exists(path)) {
+        drawFriendboxLoadingScreen("Downloading sketch", 0, sketch_id, "Touch to skip not available");
+        bool ok = networkDownloadFbox(sketch_id, path);
+        if (!ok) {
+            drawFriendboxLoadingScreen("Download failed", 1500, sketch_id);
+            return;
+        }
+    }
+    drawFriendboxLoadingScreen("Playing Sketch", 250, sketch_id, "ENJOY :)");
+    playFboxAnimation(path);
 }
 
 void setup()
@@ -81,10 +96,14 @@ void setup()
   Serial.print(FRIENDBOX_SOFTWARE_VERSION);
   Serial.println(" - DEBUG");
 #endif
-  // initMenuButton();
+  initMenuButton();
   initFriendbox();
+  //displayFlashReadJEDECID();
+  //playSketchFromServer("1778816259113"); // TP3
+  //playSketchFromServer("1778537329511"); // TP1
+  playSketchFromServer("1778875275865");
 }
-
+ 
 void loop()
 {
   handleTouch();

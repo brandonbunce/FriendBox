@@ -1,6 +1,7 @@
 #include "network.hpp"
 #include "display.hpp"
 #include "canvas.hpp"
+#include <SD.h>
 
 // Network
 HTTPClient http;
@@ -169,6 +170,78 @@ bool networkSendCanvas()
     http.end();
     return false;
   }
+}
+
+bool networkDownloadFbox(const char *sketch_id, const char *dest_path)
+{
+    WiFiClientSecure client;
+    client.setInsecure(); // accept any cert — personal server
+
+    HTTPClient http;
+    String url = "https://" FRIENDBOX_SERVER "/api/download/sketch/";
+    url += sketch_id;
+    Serial.printf("networkDownloadFbox: GET %s\n", url.c_str());
+
+    if (!http.begin(client, url)) {
+        Serial.println("networkDownloadFbox: http.begin failed");
+        return false;
+    }
+    http.setTimeout(60000); // 60 s — large files may be slow on first request
+
+    int httpCode = http.GET();
+    if (httpCode != HTTP_CODE_OK) {
+        Serial.printf("networkDownloadFbox: HTTP %d\n", httpCode);
+        http.end();
+        return false;
+    }
+
+    int contentLen = http.getSize(); // -1 if chunked/unknown
+    Serial.printf("networkDownloadFbox: %d bytes expected\n", contentLen);
+
+    File f = SD.open(dest_path, FILE_WRITE);
+    if (!f) {
+        Serial.printf("networkDownloadFbox: cannot create %s\n", dest_path);
+        http.end();
+        return false;
+    }
+
+    WiFiClient *stream = http.getStreamPtr();
+    uint8_t buf[512];
+    int total = 0;
+    bool write_err = false;
+
+    while (http.connected() || stream->available()) {
+        int avail = stream->available();
+        if (avail > 0) {
+            int n = stream->readBytes(buf, min(avail, (int)sizeof(buf)));
+            if ((int)f.write(buf, n) != n) {
+                Serial.println("networkDownloadFbox: SD write failed (card full?)");
+                write_err = true;
+                break;
+            }
+            total += n;
+            if (total % 10240 == 0)
+                Serial.printf("  %d KB...\n", total / 1024);
+        } else {
+            delay(1);
+        }
+        yield(); // feed watchdog during long downloads
+        if (contentLen > 0 && total >= contentLen) break;
+    }
+
+    f.close();
+    http.end();
+
+    bool complete = !write_err && (contentLen < 0 || total == contentLen);
+    Serial.printf("networkDownloadFbox: %s — %d / %d bytes to %s\n",
+                  complete ? "OK" : "INCOMPLETE", total, contentLen, dest_path);
+
+    if (!complete) {
+        SD.remove(dest_path);
+        Serial.println("networkDownloadFbox: partial file deleted");
+        return false;
+    }
+    return true;
 }
 
 void networkSendFramebuffer(int userID)

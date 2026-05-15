@@ -198,22 +198,6 @@ void initUIForScreenCanvasMenu()
         }
     }
 
-    // Init Tool Settings Buttons (change size n stuff)
-    for (int col = 0; col < SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON_COUNT; col++)
-    {
-        SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[col].x = SCREEN_CANVAS_UI_ACTION_BUTTON_X_POS(2);
-        SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[col].y = ((col + 1) * (SCREEN_CANVAS_UI_ACTION_BAR_ITEM_HEIGHT_PX + CANVAS_DRAW_MENU_DROPDOWN_DIST_BETWEEN_ITEMS) + SCREEN_CANVAS_UI_ACTION_BAR_DIST_FROM_TOP_PX + SCREEN_CANVAS_UI_ACTION_BAR_ITEM_HEIGHT_PX);
-        SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[col].w = SCREEN_CANVAS_UI_ACTION_BAR_ITEM_WIDTH_PX;
-        SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[col].h = SCREEN_CANVAS_UI_ACTION_BAR_ITEM_HEIGHT_PX;
-        SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
-        SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[col].screenContext = SCREEN_CANVAS_MENU;
-        SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[col].subcontext = (int)DROPDOWN_TOOLS;
-        SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[col].button.initButtonUL(&tft, SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[col].x, SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[col].y, SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[col].w, SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[col].h,
-                                                                         TFT_WHITE, (int)draw_color_palette[currentDrawColorIndex], (int)draw_color_palette_text_color[currentDrawColorIndex],
-                                                                         "---", 2, 2);
-        uiButtons.push_back(&SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[col]);
-    }
-
     // Init Save Buttons
     for (int col = 0; col < SLOT_DROPDOWN_BUTTON_COUNT; col++)
     {
@@ -347,37 +331,6 @@ void handleTouchUIUpdateScreenCanvasMenu()
                 drawScreenCanvasMenu();
             }
         }
-        for (uint8_t b = 0; b < SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON_COUNT; b++)
-        {
-            if (handleUIButtonPress(&SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[b], ACT_ON_PRESS))
-            {
-                switch (currentTool)
-                {
-                case TOOL_PENCIL:
-                case TOOL_BRUSH:
-                case TOOL_RAINBOW:
-                case TOOL_DITHER:
-                    switch (b)
-                    {
-                    case 0:
-                        setBrushSize(currentBrushRadius - 1);
-                        drawScreenCanvasMenu();
-                        break;
-                    case 1:
-                        setBrushSize(currentBrushRadius + 1);
-                        drawScreenCanvasMenu();
-                        break;
-                    default:
-                        break;
-                    }
-                    break;
-                case TOOL_FILL:
-                    break;
-                case TOOL_STICKER:
-                    break;
-                }
-            }
-        }
         break;
     case DROPDOWN_SAVE:
         for (uint8_t b = 0; b < SLOT_DROPDOWN_BUTTON_COUNT; b++)
@@ -480,86 +433,6 @@ void drawScreenCanvasMenu()
                 SCREEN_CANVAS_MENU_TOOL_BUTTON[col].button.drawButton();
             }
             SCREEN_CANVAS_MENU_TOOL_BUTTON[col].isDrawn = true;
-        }
-        for (int col = 0; col < SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON_COUNT; col++)
-        {
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
-        }
-        char sizeStatus[20];
-        switch (currentTool)
-        {
-        case TOOL_PENCIL:
-        case TOOL_BRUSH:
-        case TOOL_RAINBOW:
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[0].button.setLabelText("- Size");
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[0].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[0].isDrawn = true;
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[1].button.setLabelText("+ Size");
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[1].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[1].isDrawn = true;
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[2].button.setLabelText("");
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[2].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[2].isDrawn = true;
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[3].button.setLabelText("");
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[3].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[3].isDrawn = true;
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[4].button.setLabelText("");
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[4].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[4].isDrawn = true;
-            snprintf(sizeStatus, sizeof(sizeStatus), "Size: %d", currentBrushRadius);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[5].button.setLabelText(sizeStatus);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[5].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[5].isDrawn = true;
-            break;
-        case TOOL_FILL:
-            break;
-        case TOOL_DITHER:
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[0].button.setLabelText("- Size");
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[0].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[0].isDrawn = true;
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[1].button.setLabelText("+ Size");
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[1].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[1].isDrawn = true;
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[2].button.setLabelText("Draw Odd");
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[2].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[2].isDrawn = true;
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[3].button.setLabelText("Draw Even");
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[3].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[3].isDrawn = true;
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[4].button.setLabelText("Curr: E");
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[4].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[4].isDrawn = true;
-            snprintf(sizeStatus, sizeof(sizeStatus), "Size: %d", currentBrushRadius);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[5].button.setLabelText(sizeStatus);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[5].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[5].isDrawn = true;
-            break;
-        case TOOL_STICKER: // actually pattern for now, but we can use downsampling algorithm to do this!
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[0].button.setLabelText("Size 1x");
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[0].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[0].isDrawn = true;
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[1].button.setLabelText("Size 2x");
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[1].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[1].isDrawn = true;
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[2].button.setLabelText("Size 3x");
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[2].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[2].isDrawn = true;
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[2].button.setLabelText("Select");
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[2].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[2].isDrawn = true;
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[3].button.setLabelText("");
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[3].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[3].isDrawn = true;
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[4].button.setLabelText("");
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[4].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[4].isDrawn = true;
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[5].button.setLabelText("");
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[5].button.drawButton(false);
-            SCREEN_CANVAS_MENU_TOOL_SETTINGS_BUTTON[5].isDrawn = true;
-            break;
-        default:
-            break;
         }
         break;
     case DROPDOWN_SAVE:

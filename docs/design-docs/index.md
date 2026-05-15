@@ -5,6 +5,7 @@ Design documents record *why* decisions were made, not just what was built. Chec
 | Document | Status | Topic |
 |---|---|---|
 | [core-beliefs.md](core-beliefs.md) | Active | Operating principles for this codebase |
+| [fbox-codec.md](fbox-codec.md) | Active | FBOX binary format spec, decode recipe, and design decisions |
 
 ---
 

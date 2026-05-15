@@ -7,13 +7,6 @@
 #include <Preferences.h>
 #include <LovyanGFX.h>
 
-/* SCREEN_SEND */
-#define SCREEN_SEND_ADDRESSBOOK_BUTTON_COUNT 5
-#define SCREEN_SEND_NAVI_BUTTON_COUNT 5
-
-/* SCREEN_FILE_BROWSER */
-#define SCREEN_FILE_BROWSER_FILE_BUTTON_COUNT 5
-#define SCREEN_FILE_BROWSER_NAVI_BUTTON_COUNT 4
 
 struct UIList
 {
@@ -84,7 +77,7 @@ extern UIButton *lastPressedButton;
  * - implemented: false → log critical and abort the transition (matches the legacy default branch).
  * - preservePriorUI: true → cleanupUIOutOfContext(false) on entry (used by transient overlays like SCREEN_SYSTEM_MESSAGE).
  * - init/onEnter/draw/handleTouch: optional (nullptr to skip).
- *   - init runs once (dedupe-guarded by checkIfUIIsInitialized) to build LGFX_Buttons.
+ *   - init runs once (dedupe-guarded by s_initialized[]) to build LGFX_Buttons.
  *   - onEnter runs every transition into the screen, before draw — for state resets (page=0, dropdown=NONE, etc.).
  *   - draw paints the screen.
  *   - handleTouch is called every frame from handleTouchUIUpdate.
@@ -108,16 +101,9 @@ struct ScreenHandlers
 extern const ScreenHandlers screens[];
 
 // Functions
-/** Check if UI is already initialized for a given screen context. If it's not, initialize it.
- * @param targetScreen The screen context we want to check for initialization and initialize if not already.
- */
+/** Initialize UI for the target screen if not already done (guarded by s_initialized[]). */
 void initUIForScreen(screen_id_t targetScreen);
-/**
- * Draw
- * @param page Starting from zero, show which "page" of friends we're showing in the address book. Each page shows 5 friends, so page 0 shows friends 0-4, page 1 shows friends 5-9, etc.
- */
-void drawScreenSend(int page = 0);
-void drawScreenFileBrowser(int page = 0);
+void useCanvasSlot();
 bool drawSketchPreview(const char *filepath, int x, int y, int scaleDown, bool drawBorder = true);
 /** Switch context to loading screen and show while waiting for operations or network activity.
  * @param subtitle Subtitle to show under loading text, can be used to give more context on what we're waiting for.
@@ -131,11 +117,6 @@ void drawFriendboxLoadingScreen(const char *subtitle, int holdTimeMs = 0, const 
  * @param removeFromContext On top of redrawing over element, should we also remove it from the UI elements vector?
  */
 void cleanupUIOutOfContext(bool destroyElement = false);
-/** Loop through current UI elements to see if any exist belonging to the target context.
- * @param targetScreen Which screen context are we checking for?
- * @return bool True if we find an element in the target context, false if we loop through all elements without finding one.
- */
-bool checkIfUIIsInitialized(screen_id_t targetScreen);
 void changeScreenContext(screen_id_t targetScreen);
 /** Run this to check the target button for inputs, and register a logical press when the button is pressed according to mode.
  * @param targetButton The button we are checking for input on.

@@ -22,6 +22,9 @@ Product specs define user-facing behavior before implementation begins. Each spe
 | Save slots (SD card) | Shipped | — |
 | Drawing tools (pencil, fill, dither) | Shipped | — |
 | Hall effect menu sensor | Shipped | — |
+| Load sketch from SD (file browser) | Shipped | — |
+| Send drawing to server | Shipped | — |
+| Animation playback from server | In progress | [animation-playback.md](animation-playback.md) |
 | Send drawing to friend | Planned | — |
 | Receive drawing from friend | Planned | — |
 | Friend list | Planned | — |

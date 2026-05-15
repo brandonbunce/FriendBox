@@ -129,19 +129,53 @@ Other screens (`SEND`, `FILE_BROWSER`) call `useCanvasSlot()` in their `onEnter`
 - `UIList`: paginated friend and file lists.
 
 **Current modules:**
-- `ui_core.cpp/hpp` — dispatcher, registry, button handling, cleanup, `drawScreenSend` / `drawScreenFileBrowser` / `drawSketchPreview` / `drawFriendboxLoadingScreen`. SEND and FILE_BROWSER hook implementations are still file-static here pending extraction.
-- `ui_screen_canvas_menu.cpp/hpp` — extracted screen module: dropdown layout constants, action/color/menu/tool/save/load buttons, dropdown render logic.
+
+| Module | Owns |
+|---|---|
+| `ui_core.cpp/hpp` | Dispatcher, registry, `UIButton` plumbing, `cleanupUIOutOfContext`, `drawSketchPreview`, `drawFriendboxLoadingScreen`, `useCanvasSlot` |
+| `ui_screen_canvas_menu.cpp/hpp` | Dropdown layout, action/color/tool/save/load buttons, dropdown render |
+| `ui_screen_send.cpp/hpp` | Address book buttons, friend list pagination, send trigger |
+| `ui_screen_file_browser.cpp/hpp` | File list buttons, pagination, file selection → `loadSketchFromSD` |
 
 ### io.cpp / io.hpp
-- SD card over SPI: CS=12, SCK=16, MISO=21, MOSI=33
-- Sketch file format: 115,200 bytes, 4-bit palette indices packed 2-per-byte for 230,400 pixels
-- NVS namespace `"Friendbox"` stores user preferences
-- Hall effect sensor: GPIO 15, 50 ms debounce, opens main menu
+
+**SD hardware:** SPI on CS=12, SCK=16, MISO=21, MOSI=33. Clock locked to 40 MHz to avoid bus contention with the display.
+
+**NVS:** namespace `"Friendbox"`, stores small user preferences (last slot, etc.).
+
+**Hall effect sensor:** GPIO 15, 50 ms debounce, opens the canvas menu.
+
+**FBOX codec** — the canonical binary format for all sketches and animations. See [design-docs/fbox-codec.md](design-docs/fbox-codec.md) for the format spec. The public API in `io.hpp`:
+
+| Function | Purpose |
+|---|---|
+| `fboxReadHeader(File &f, FboxHeader &out)` | Parse 128-byte header, validate magic and version |
+| `fboxLoadFrame0(File &f, const FboxHeader &hdr)` | Decode frame 0 into a malloc'd nibble buffer; handles both v1 and v2 |
+| `loadSketchFromSD(const char *path)` | Open .fbox, decode frame 0, blit to LT7680 canvas slot |
+| `playFboxAnimation(const char *path)` | Decode and display all frames in a loop at the file's FPS; touch exits |
+
+`fboxRleDecode` is a `static` helper — not in the public header. It decodes one v2 RLE frame into a nibble buffer.
+
+**File layout on SD:**
+
+```
+/sketches/saved/     — user-saved sketches (.fbox files)
+/sketches/received/  — sketches downloaded from the server
+```
 
 ### network.cpp / network.hpp
-- WiFi connection with hostname `"friendbox"`
-- `networkGetFriends()`: HTTP GET → ArduinoJson parse → friend list
-- `networkSendFramebuffer()` / `networkReceiveFramebuffer()`: stubs, not yet implemented
+
+WiFi connection with hostname `"friendbox"`.
+
+| Function | Status | Notes |
+|---|---|---|
+| `networkGetFriends()` | Implemented | HTTP GET `/get/friends` → ArduinoJson → `std::vector<std::string>` |
+| `networkSendCanvas()` | Implemented | Reads LT7680 SDRAM line-by-line, packs to 4-bit, POST to `/sketches/upload` |
+| `networkDownloadFbox(sketch_id, dest_path)` | Implemented | HTTPS GET from `friendbox.chocolatedonut.dev/api/download/sketch/{id}`, streams body to SD file via 512-byte chunks; yields watchdog each iteration |
+| `networkSendFramebuffer()` | Stub | Not yet implemented |
+| `networkReceiveFramebuffer()` | Stub | Not yet implemented |
+
+`networkDownloadFbox` uses `WiFiClientSecure` with `setInsecure()` — certificate validation is skipped because this targets the project's own server. A cached file on SD is not re-downloaded.
 
 ### lib/Panel_PCBA5981/
 Low-level driver for the LT7680A graphics accelerator driving the ST7701S MIPI panel. Implements the LovyanGFX panel interface. Not modified during normal feature work.

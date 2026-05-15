@@ -17,9 +17,15 @@ namespace lgfx
  {
 //----------------------------------------------------------------------------
 
-// SDRAM refresh interval for 60 MHz MCLK, 8192 rows, 64 ms period.
+// SDRAM Auto Refresh Interval (REG[E3h-E2h]). Datasheet §13 Table 13-7
+// recommends 0x061A for LT7680A-R/B-R (MCLK=100 MHz, 4K rows, Tref=64ms).
+// Earlier value 486 (0x01E6) assumed 60 MHz MCLK + 8K rows — neither of
+// which match our PLL config (N=100, R=5, OD=1 → 100 MHz MCLK) or the
+// SDRAR setting (REG[E0]=0x29 → 4K rows). Refreshing 3.2x too often eats
+// SDRAM bandwidth and starves host writes during the per-frame burst,
+// dropping bytes destined for the last SDRAM rows.
 //   sdram_itv = (64000000 / 8192) / (1000 / 60) - 2  = 486
-static constexpr uint16_t SDRAM_REFRESH_INTERVAL = 486;
+static constexpr uint16_t SDRAM_REFRESH_INTERVAL = 0x061A;
 
 static constexpr uint32_t CANVAS_BASE_ADDR = 0;
 
@@ -90,7 +96,18 @@ bool Panel_PCBA5981::_wait_busy(uint32_t timeout_ms)
 
 void Panel_PCBA5981::_wait_sdram_ready(void)
 {
-    while ((_read_status() & 0x04) == 0x00) {}
+    auto t = millis();
+    uint8_t s;
+    while (((s = _read_status()) & 0x04) == 0x00)
+    {
+        if (millis() - t > 500)
+        {
+            Serial.printf("[PANEL] _wait_sdram_ready TIMEOUT status=0x%02X\n", s);
+            cs_control(false);
+            return;
+        }
+    }
+    Serial.printf("[PANEL] SDRAM ready (status=0x%02X, %lums)\n", s, millis() - t);
     cs_control(false);
 }
 
@@ -166,10 +183,19 @@ void Panel_PCBA5981::_start_memoryread(uint16_t x, uint16_t y, uint16_t w, uint1
     (void)_read_byte();  // discard dummy first byte
 }
 
+// RGB565 → RGB332 palette index: top-3 R, top-3 G, top-2 B.
+static inline uint8_t rgb565_to_clut8(uint16_t c)
+{
+    return (uint8_t)(((c >> 13) & 0x07) << 5 |   // R[7:5]
+                     ((c >>  8) & 0x07) << 2 |   // G[4:2]
+                     ((c >>  3) & 0x03));          // B[1:0]
+}
+
 void Panel_PCBA5981::_write_pixel16(uint16_t color)
 {
-    _cmd16((uint16_t)(((color & 0xFF) << 8) | 0x80));   // low byte
-    _cmd16((uint16_t)(((color >>   8) << 8) | 0x80));   // high byte
+    // Canvas is 8bpp: send one palette-index byte per pixel.
+    uint8_t idx = rgb565_to_clut8(color);
+    _cmd16((uint16_t)((idx << 8) | 0x80));
 }
 
 void Panel_PCBA5981::_set_forecolor(uint32_t rawcolor)
@@ -178,6 +204,22 @@ void Panel_PCBA5981::_set_forecolor(uint32_t rawcolor)
     _write_reg(0xD2, (uint8_t)(c >> 8));
     _write_reg(0xD3, (uint8_t)(c >> 3));
     _write_reg(0xD4, (uint8_t)(c << 3));
+}
+
+// Program a fixed 256-entry RGB332 palette into the chip CLUT.
+// Entry i maps to R = i[7:5] expanded to 8 bits, G = i[4:2], B = i[1:0].
+// REG[CEh] PCLUT_SA: start index. REG[CFh] PCLUT_D: R then G then B, auto-increments.
+void Panel_PCBA5981::_init_clut_rgb332(void)
+{
+    _write_reg(0xCE, 0x00);   // start at palette entry 0
+    for (int i = 0; i < 256; i++) {
+        uint8_t r = (uint8_t)(((i >> 5) & 0x07) * 255 / 7);
+        uint8_t g = (uint8_t)(((i >> 2) & 0x07) * 255 / 7);
+        uint8_t b = (uint8_t)(( i       & 0x03) * 255 / 3);
+        _write_reg(0xCF, r);
+        _write_reg(0xCF, g);
+        _write_reg(0xCF, b);
+    }
 }
 
 //============================================================================
@@ -208,12 +250,51 @@ void Panel_PCBA5981::end_transaction(void)
 // Multi-frame SDRAM addressing
 //============================================================================
 
+// LT7680 §13.4 — VSYNC interrupt lives in INTEN/INTF, bit 4 (0x10):
+//   REG[0Bh] INTEN: bit4 = VSYNC Time Base Interrupt Enable
+//   REG[0Ch] INTF : bit4 = VSYNC flag (read=status, write-1-to-clear)
+// (Earlier code used REG[F0h]/[F1h] bit3 — that's the RA8876 map and does
+//  nothing on the LT7680. The wait silently timed out every frame, so
+//  setMainImageAddress() landed at a random point in the scan cycle and
+//  produced the bottom-strip tearing artifact.)
+void Panel_PCBA5981::waitVSync(uint32_t timeout_ms)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+
+    uint8_t inten = _read_reg_byte(0x0B);
+    _write_reg(0x0B, inten | 0x10);   // enable VSYNC interrupt
+    _write_reg(0x0C, 0x10);            // clear any stale VSYNC flag
+
+    auto t = millis();
+    while (!(_read_reg_byte(0x0C) & 0x10)) {
+        if (millis() - t > timeout_ms) break;
+    }
+
+    _write_reg(0x0C, 0x10);            // clear the flag
+    _write_reg(0x0B, inten);           // restore prior INTEN
+
+    if (!tr) end_transaction();
+}
+
 void Panel_PCBA5981::setMainImageAddress(uint32_t addr)
 {
     bool tr = _in_transaction;
     if (!tr) begin_transaction();
     _write_reg32(0x20, addr);   // MISA: Main Image Start Address
     if (!tr) end_transaction();
+}
+
+uint32_t Panel_PCBA5981::readMainImageAddress(void)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+    uint32_t v = (uint32_t)_read_reg_byte(0x20)
+               | ((uint32_t)_read_reg_byte(0x21) <<  8)
+               | ((uint32_t)_read_reg_byte(0x22) << 16)
+               | ((uint32_t)_read_reg_byte(0x23) << 24);
+    if (!tr) end_transaction();
+    return v;
 }
 
 void Panel_PCBA5981::setCanvasAddress(uint32_t addr)
@@ -313,8 +394,8 @@ void Panel_PCBA5981::blitFrames(uint32_t src_addr, uint16_t src_x, uint16_t src_
 
     // Memory copy with ROP=copy, op=positive direction memory copy.
     _write_reg(0x91, 0xC2);
-    // S0 = 16bpp, dest = 16bpp.
-    _write_reg(0x92, 0x21);
+    // S0 = 8bpp, dest = 8bpp.
+    _write_reg(0x92, 0x00);
 
     // S0 (source).
     _write_reg32(0x93, src_addr);
@@ -453,7 +534,7 @@ void Panel_PCBA5981::_st7701s_init_sequence(void)
     };
     st7701s_cmd(cs, clk, din, 0xE2);
     for (uint8_t v : e2_seq) st7701s_data(cs, clk, din, v);
-
+// 1776835153465.fbox
     static const uint8_t e3_seq[] = { 0x00, 0x00, 0x11, 0x11 };
     st7701s_cmd(cs, clk, din, 0xE3);
     for (uint8_t v : e3_seq) st7701s_data(cs, clk, din, v);
@@ -557,11 +638,18 @@ bool Panel_PCBA5981::init(bool use_reset)
 
     // ---- Wait for normal-operation mode (STSR bit1 == 0) ----
     {
+        uint8_t s0 = _read_status();
+        Serial.printf("[PANEL] Initial STSR=0x%02X\n", s0);
         auto t = millis();
         while (_read_status() & 0x02)
         {
-            if (millis() - t > 500) { endWrite(); return false; }
+            if (millis() - t > 500)
+            {
+                Serial.printf("[PANEL] Normal-op wait TIMEOUT STSR=0x%02X\n", _read_status());
+                endWrite(); return false;
+            }
         }
+        Serial.printf("[PANEL] Normal-op OK STSR=0x%02X\n", _read_status());
     }
 
     // ---- PLL ----
@@ -640,7 +728,7 @@ bool Panel_PCBA5981::init(bool use_reset)
         _write_reg(0x1F, (uint8_t)(timing.v_sync_width  - 1));
     }
 
-    _write_reg(0x10, 0x04);   // MPWCTR: main window 16bpp (bits[3:2]=01b)
+    _write_reg(0x10, 0x00);   // MPWCTR: main window 8bpp (bits[3:2]=00b)
 
     // ---- Main image / canvas ----
     _write_reg32(0x20, CANVAS_BASE_ADDR);
@@ -651,7 +739,9 @@ bool Panel_PCBA5981::init(bool use_reset)
     _write_reg32(0x50, CANVAS_BASE_ADDR);
     _write_reg16(0x54, (uint16_t)timing.h_display);
 
-    _write_reg(0x5E, 0x01);   // AW_COLOR: XY mode, 16bpp
+    _write_reg(0x5E, 0x00);   // AW_COLOR: XY mode, 8bpp
+
+    _init_clut_rgb332();
 
     _win_xs = 0;  _win_ys = 0;
     _win_xe = (uint16_t)(timing.h_display - 1);
@@ -720,7 +810,8 @@ void Panel_PCBA5981::setRotation(uint_fast8_t r)
     case 3: wdir = 0x06; break;
     }
 
-    _write_reg(0x02, (uint8_t)(0x40 | wdir));
+    _reg02 = (uint8_t)(0x40 | wdir);
+    _write_reg(0x02, _reg02);
 
     _latestcolor = ~0u;
 }
@@ -802,7 +893,7 @@ void Panel_PCBA5981::writeFillRectPreclipped(uint_fast16_t x, uint_fast16_t y,
     // fills land in whatever slot setCanvasAddress() most recently selected.
     _set_forecolor(rawcolor);
     _write_reg(0x91, 0xCC);
-    _write_reg(0x92, 0x01);
+    _write_reg(0x92, 0x00);   // dest 8bpp
 
     _write_reg32(0xA7, _canvas_addr);
     _write_reg16(0xAB, (uint16_t)timing.h_display);
@@ -908,6 +999,418 @@ void Panel_PCBA5981::writeRawPixels(uint16_t x, uint16_t y,
     if (!tr) end_transaction();
 }
 
+void Panel_PCBA5981::writeRawFrame(const uint16_t* data, uint16_t w, uint16_t h)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+    setWindow(0, 0, w - 1, h - 1);
+    _start_memorywrite();
+    uint32_t count = (uint32_t)w * h;
+    for (uint32_t i = 0; i < count; i++) _write_pixel16(data[i]);
+    if (!tr) end_transaction();
+}
+
+// DIAGNOSTIC: row-at-a-time write. Each row is a fresh 480x1 active window
+// + a small per-row [0x80]+480-byte burst, instead of one 230,400-byte burst.
+// Slower than the bulk path but uses the same code shape as writeRawPixels.
+void Panel_PCBA5981::writeRawFrame8bppRowByRow(const uint8_t* clut8)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+
+    _write_reg(0x02, 0x40);   // MSD natural
+
+    static const uint8_t kPrefix = 0x80;
+    const uint16_t W = timing.h_display;
+    const uint16_t H = timing.v_display;
+    for (uint16_t y = 0; y < H; y++) {
+        setWindow(0, y, W - 1, y);
+        _start_memorywrite();   // sets active window to (0,y)-(W-1,y), selects MRWDP
+
+        cs_control(false);
+        _bus->writeBytes(&kPrefix, 1, true, false);
+        _bus->wait();
+        _bus->writeBytes(clut8 + (uint32_t)y * W, W, true, true);
+        _bus->wait();
+        cs_control(true);
+    }
+
+    _write_reg(0x02, _reg02);
+    _flg_memorywrite = false;
+    if (!tr) end_transaction();
+}
+
+void Panel_PCBA5981::writeRawFrame8bpp(const uint8_t* clut8, uint32_t count)
+{
+    if (count == 0) return;
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+
+    // Animation frames are pixel-order natural (L→R, T→B). Temporarily override
+    // REG[02h] MSD to natural order so the write cursor starts at top-left;
+    // restore the rotation setting after the burst.
+    _write_reg(0x02, 0x40);
+    setWindow(0, 0, timing.h_display - 1, timing.v_display - 1);
+    _start_memorywrite();  // selects REG[04h]; CS ends HIGH
+
+    // LT7680 burst write protocol:
+    //   0x80 prefix (A0=1, RW#=0) enters streaming mode; all subsequent bytes
+    //   with CS held go directly to the chip's Memory Write FIFO, which drains
+    //   asynchronously into SDRAM with auto-incrementing address (REG[04h]).
+    //   kPrefix is a 1-byte polling write; clut8 (ps_malloc 4-byte aligned) is DMA.
+    // The whole frame is written in a single CS-held burst — re-asserting CS
+    // between chunks (multiple [0x80] prefixes) was observed to gradually
+    // corrupt SDRAM over many frames.
+    static const uint8_t kPrefix = 0x80;
+    cs_control(false);
+    _bus->writeBytes(&kPrefix, 1, true, false);
+    _bus->wait();
+    _bus->writeBytes(clut8, count, true, true);
+    _bus->wait();
+    cs_control(true);
+
+    // After CS deasserts, the chip still has up to a FIFO's worth of pending
+    // bytes destined for the LAST SDRAM rows. STSR bit 6 = "Memory Write FIFO
+    // Empty" — wait for it to go high before we let any subsequent op (e.g.
+    // MISA flip) proceed.
+    auto t0 = millis();
+    while ((_read_status() & 0x40) == 0) {
+        if (millis() - t0 > 50) break;   // safety: ~3 frame periods
+    }
+
+    // Diagnostic: read back the last 8 bytes of the canvas slot from SDRAM
+    // and compare to what we sent. If they don't match, the SPI burst is
+    // silently dropping bytes near the end even though the cursor wrapped.
+    static uint32_t diag_n = 0;
+    if (diag_n < 4) {
+        diag_n++;
+        uint16_t y = timing.v_display - 1;       // last row
+        uint16_t w = 8;
+        uint16_t x = timing.h_display - w;       // last 8 cols of last row
+        _start_memoryread(x, y, w, 1);
+        uint8_t got[8];
+        for (int i = 0; i < 8; i++) got[i] = _read_byte();
+
+        const uint8_t* expected = clut8 + (uint32_t)y * timing.h_display + x;
+        Serial.printf("[SDRAM] frame=%lu expected=%02X %02X %02X %02X %02X %02X %02X %02X\n",
+                      (unsigned long)diag_n,
+                      expected[0], expected[1], expected[2], expected[3],
+                      expected[4], expected[5], expected[6], expected[7]);
+        Serial.printf("[SDRAM] frame=%lu  read_bk=%02X %02X %02X %02X %02X %02X %02X %02X\n",
+                      (unsigned long)diag_n,
+                      got[0], got[1], got[2], got[3],
+                      got[4], got[5], got[6], got[7]);
+    }
+
+    _write_reg(0x02, _reg02);  // restore rotation
+    _flg_memorywrite = false;
+    if (!tr) end_transaction();
+}
+
+//============================================================================
+// SPI Master helpers (§10.2, REG[B8h–BBh])
+//============================================================================
+
+// SFCLK = CPLL / (2 * (div + 1)).  div=1 → 25 MHz @ 100 MHz CPLL.
+// W25Q128 supports up to 50 MHz (Normal Read); 25 MHz gives headroom on PCB traces.
+static constexpr uint8_t SPI_MASTER_CLK_DIV   = 1;
+// SPIMCR2 (B9h): {1'b0, mask, SS#_sel, ss_active, ovfirqen, emtirqen, cpol, cpha}
+// Mode 3 (CPOL=1, CPHA=1), SFCS1# (bit5=1) — the onboard 128M flash is wired to
+// SFCS1#, confirmed by reference example always using SCS=1 in DMA_24bit_Block and
+// LCD_Select_Outside_Font_Init. Using SFCS0# (0x1F/0x0F) leaves the clock idle.
+static constexpr uint8_t SPIMCR2_CS_ASSERT    = 0x3F;  // SS#_sel=1(SFCS1#), ss_active=1, Mode3
+static constexpr uint8_t SPIMCR2_CS_DEASSERT  = 0x2F;  // SS#_sel=1(SFCS1#), ss_active=0, Mode3
+
+void Panel_PCBA5981::_select_reg(uint8_t reg)
+{
+    _flg_memorywrite = false;
+    _bus->wait();
+    cs_control(true);
+    cs_control(false);
+    _bus->writeCommand((uint32_t)reg << 8, 16);  // [0x00][reg]
+}
+
+uint8_t Panel_PCBA5981::_read_reg_byte(uint8_t reg)
+{
+    _select_reg(reg);
+    return _read_byte();
+}
+
+void Panel_PCBA5981::_spi_cs_assert(void)
+{
+    // Deassert first — resets both TX and RX FIFOs (§10.2 FIFO Overrun).
+    _write_reg(0xB9, SPIMCR2_CS_DEASSERT);
+    _write_reg(0xB9, SPIMCR2_CS_ASSERT);
+}
+
+void Panel_PCBA5981::_spi_cs_deassert(void)
+{
+    _write_reg(0xB9, SPIMCR2_CS_DEASSERT);
+}
+
+void Panel_PCBA5981::_spi_tx(uint8_t data)
+{
+    _write_reg(0xB8, data);  // SPIDR write → TX FIFO
+}
+
+// Wait for the SPI master TX FIFO to drain.
+// Polling SPIMSR (BAh) via the host SPI bus while the SPI master is running blocks
+// the LT7680's own SPI engine — bit5 never returns, TX never completes.
+// Fix: use a fixed delay sized for the worst case (16 bytes at the current SFCLK).
+// At div=1 (25 MHz): 16 * 8 / 25e6 = 51 µs. 150 µs gives 3× margin.
+uint8_t Panel_PCBA5981::_spi_wait_done(void)
+{
+    delayMicroseconds(150);
+    return _read_reg_byte(0xBA);  // SPIMSR — SPI master is idle by now; safe to read
+}
+
+// Send buf[0..len) in ≤16-byte chunks (FIFO depth = 16 bytes).
+// RX bytes are ignored (not drained) — caller must deassert CS before
+// any subsequent RX to reset the RX FIFO.
+void Panel_PCBA5981::_spi_write_buf(const uint8_t* buf, uint16_t len)
+{
+    while (len > 0) {
+        uint16_t chunk = (len > 16) ? 16 : len;
+        for (uint16_t i = 0; i < chunk; i++) _spi_tx(*buf++);
+        _spi_wait_done();
+        len -= chunk;
+    }
+}
+
+void Panel_PCBA5981::_flash_write_enable(void)
+{
+    _spi_cs_assert();
+    _spi_tx(0x06);  // WREN
+    _spi_wait_done();
+    _spi_cs_deassert();
+    Serial.println("[FLASH] WREN sent");
+}
+
+bool Panel_PCBA5981::_flash_wait_ready(uint32_t timeout_ms)
+{
+    auto t = millis();
+    while (true) {
+        // RDSR: send cmd + 1 dummy to clock in status byte.
+        _spi_cs_assert();
+        _spi_tx(0x05);   // RDSR1
+        _spi_tx(0x00);   // dummy — clocks in status byte
+        _spi_wait_done();
+        // Read 2 bytes from RX FIFO: discard byte 0 (received during 0x05 cmd),
+        // keep byte 1 (status received during dummy).
+        _select_reg(0xB8);
+        (void)_read_byte();
+        uint8_t sr = _read_byte();
+        _spi_cs_deassert();
+
+        Serial.printf("[FLASH] SR1=0x%02X WIP=%d\n", sr, sr & 1);
+        if (!(sr & 0x01)) return true;
+
+        if (millis() - t > timeout_ms) {
+            Serial.printf("[FLASH] _flash_wait_ready TIMEOUT SR1=0x%02X\n", sr);
+            return false;
+        }
+        delay(1);
+    }
+}
+
+//============================================================================
+// Public Serial Flash API
+//============================================================================
+
+uint32_t Panel_PCBA5981::flashReadJEDECID(void)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+
+    Serial.println("[FLASH] --- flashReadJEDECID ---");
+    _write_reg(0xBB, SPI_MASTER_CLK_DIV);
+    Serial.printf("[FLASH] CLK div=%u  SPIMSR before=%02X\n",
+                  SPI_MASTER_CLK_DIV, _read_reg_byte(0xBA));
+
+    // 0x9F + 3 dummy bytes → 4 RX bytes (1 garbage + 3 ID bytes).
+    _spi_cs_assert();
+    Serial.printf("[FLASH] CS asserted  SPIMSR=%02X\n", _read_reg_byte(0xBA));
+
+    _spi_tx(0x9F);
+    _spi_tx(0x00); _spi_tx(0x00); _spi_tx(0x00);
+    Serial.printf("[FLASH] TX queued    SPIMSR=%02X\n", _read_reg_byte(0xBA));
+
+    uint8_t spimsr = _spi_wait_done();
+    Serial.printf("[FLASH] TX done      SPIMSR=%02X\n", spimsr);
+
+    _select_reg(0xB8);
+    uint8_t r0 = _read_byte();   // garbage (received while sending 0x9F cmd)
+    uint8_t mfr  = _read_byte();
+    uint8_t type = _read_byte();
+    uint8_t cap  = _read_byte();
+    _spi_cs_deassert();
+
+    Serial.printf("[FLASH] RX raw: %02X %02X %02X %02X\n", r0, mfr, type, cap);
+
+    uint32_t id = ((uint32_t)mfr << 16) | ((uint32_t)type << 8) | cap;
+    Serial.printf("[FLASH] JEDEC ID: 0x%06X  mfr=0x%02X type=0x%02X cap=0x%02X\n",
+                  id, mfr, type, cap);
+
+    if (!tr) end_transaction();
+    return id;
+}
+
+void Panel_PCBA5981::flashEraseSector(uint32_t addr)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+
+    _write_reg(0xBB, SPI_MASTER_CLK_DIV);
+    Serial.printf("[FLASH] Sector erase 0x%06X ...\n", addr);
+
+    _flash_write_enable();
+
+    _spi_cs_assert();
+    _spi_tx(0x20);                        // Sector Erase (4 KB)
+    _spi_tx((addr >> 16) & 0xFF);
+    _spi_tx((addr >>  8) & 0xFF);
+    _spi_tx( addr        & 0xFF);
+    _spi_wait_done();
+    _spi_cs_deassert();
+
+    bool ok = _flash_wait_ready(3000);
+    Serial.printf("[FLASH] Sector erase %s\n", ok ? "OK" : "FAILED");
+
+    if (!tr) end_transaction();
+}
+
+void Panel_PCBA5981::flashPageProgram(uint32_t addr, const uint8_t* data, uint16_t len)
+{
+    if (len == 0 || len > 256) {
+        Serial.printf("[FLASH] flashPageProgram bad len=%u\n", len);
+        return;
+    }
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+
+    _write_reg(0xBB, SPI_MASTER_CLK_DIV);
+    Serial.printf("[FLASH] Page program 0x%06X len=%u\n", addr, len);
+
+    _flash_write_enable();
+
+    _spi_cs_assert();
+    _spi_tx(0x02);                        // Page Program
+    _spi_tx((addr >> 16) & 0xFF);
+    _spi_tx((addr >>  8) & 0xFF);
+    _spi_tx( addr        & 0xFF);
+    _spi_wait_done();
+    _spi_write_buf(data, len);
+    _spi_cs_deassert();
+
+    bool ok = _flash_wait_ready(10);      // typ 0.4 ms, max 3 ms
+    Serial.printf("[FLASH] Page program %s\n", ok ? "OK" : "FAILED");
+
+    if (!tr) end_transaction();
+}
+
+void Panel_PCBA5981::flashReadBytes(uint32_t addr, uint8_t* buf, uint16_t len)
+{
+    if (len == 0) return;
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+
+    _write_reg(0xBB, SPI_MASTER_CLK_DIV);
+    Serial.printf("[FLASH] Read 0x%06X len=%u\n", addr, len);
+
+    // Send Read Data cmd (03h) + 3-byte address (4 bytes total TX, 4 bytes RX garbage).
+    _spi_cs_assert();
+    _spi_tx(0x03);
+    _spi_tx((addr >> 16) & 0xFF);
+    _spi_tx((addr >>  8) & 0xFF);
+    _spi_tx( addr        & 0xFF);
+    _spi_wait_done();
+    // Drain 4 RX FIFO bytes received during the command phase.
+    _select_reg(0xB8);
+    _read_byte(); _read_byte(); _read_byte(); _read_byte();
+
+    // Data phase: send dummy bytes to clock in data, read RX FIFO in 16-byte chunks.
+    for (uint16_t i = 0; i < len; ) {
+        uint16_t chunk = ((len - i) > 16) ? 16 : (len - i);
+        for (uint16_t j = 0; j < chunk; j++) _spi_tx(0x00);
+        _spi_wait_done();
+        _select_reg(0xB8);
+        for (uint16_t j = 0; j < chunk; j++) buf[i++] = _read_byte();
+    }
+    _spi_cs_deassert();
+
+    if (!tr) end_transaction();
+}
+
+//============================================================================
+// DMA: Serial Flash → SDRAM canvas (§10.3.3, Fig 10-12 polling mode)
+//============================================================================
+
+void Panel_PCBA5981::dmaFlashBlock(uint32_t flash_addr,
+                                    uint16_t flash_src_width,
+                                    uint32_t canvas_dst_addr,
+                                    uint16_t dst_x, uint16_t dst_y,
+                                    uint16_t block_w, uint16_t block_h)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+
+    Serial.printf("[DMA] Flash→SDRAM src=0x%06X srcW=%u dst=(%u,%u) wh=(%u,%u)\n",
+                  flash_addr, flash_src_width, dst_x, dst_y, block_w, block_h);
+
+    uint32_t saved_canvas = _canvas_addr;
+
+    // Flash source start address (BCh–BFh = DMA_SSTR, LSB first).
+    _write_reg32(0xBC, flash_addr);
+
+    // Destination canvas in SDRAM.
+    _write_reg32(0x50, canvas_dst_addr);           // CVSSA
+    _write_reg16(0x54, (uint16_t)timing.h_display); // CVS_IMWTH
+
+    // Destination position inside the canvas.
+    _write_reg16(0xC0, dst_x);   // DMA_DX
+    _write_reg16(0xC2, dst_y);   // DMA_DY
+
+    // Block dimensions.
+    _write_reg16(0xC6, block_w); // DMAW_WTH
+    _write_reg16(0xC8, block_h); // DMAW_HIGH
+
+    // Source image width in flash (stride, in pixels).
+    _write_reg16(0xCA, flash_src_width); // DMA_SWTH
+
+    // Canvas: 8bpp, XY/block addressing mode.
+    _write_reg(0x5E, 0x00);
+
+    // SFL_CTRL (B7h): bit7=24-bit addr, bit6=normal read, bit5=SS#_sel(1=SFCS1#).
+    // 0xE0 = SFCS1# + 24-bit + normal read — matches reference DMA_24bit_Block(SCS=1,...).
+    _write_reg(0xB7, 0xE0);
+
+    auto t = millis();
+
+    // DMA start (REG[B6h] bit0 = 1).
+    _write_reg(0xB6, 0x01);
+
+    // Poll STSR bit3: 1=busy, 0=done.
+    while (_read_status() & 0x08) {
+        if (millis() - t > 2000) {
+            Serial.println("[DMA] TIMEOUT");
+            break;
+        }
+    }
+
+    uint32_t elapsed = millis() - t;
+    Serial.printf("[DMA] Done in %lums\n", elapsed);
+
+    // Restore drawing canvas so LGFX draw ops continue to target it.
+    if (canvas_dst_addr != saved_canvas) {
+        _write_reg32(0x50, saved_canvas);
+        _write_reg16(0x54, (uint16_t)timing.h_display);
+    }
+    _canvas_addr = saved_canvas;
+    _flg_memorywrite = false;
+
+    if (!tr) end_transaction();
+}
+
 //============================================================================
 // BTE block copy
 //============================================================================
@@ -921,7 +1424,7 @@ void Panel_PCBA5981::copyRect(uint_fast16_t dst_x, uint_fast16_t dst_y,
     bool positive = (dst_y < src_y) || (dst_y == src_y && dst_x <= src_x);
 
     _write_reg(0x91, (uint8_t)(0xC0 | (positive ? 0x02 : 0x03)));
-    _write_reg(0x92, 0x21);
+    _write_reg(0x92, 0x00);   // S0 = 8bpp, dest = 8bpp
 
     // Both source and destination resolve to the active canvas; copyRect()
     // is an in-canvas blit. Cross-slot copies go through blitFrames().

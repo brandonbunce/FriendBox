@@ -94,9 +94,19 @@ namespace lgfx
     static constexpr uint32_t framebufferBytes16bpp(uint16_t w, uint16_t h)
     { return (uint32_t)w * h * 2; }
 
+    // Block until the next vertical blanking interval begins, then return.
+    // Gates the MISA register write so the flip takes effect during blanking
+    // rather than mid-scan, eliminating the torn-line artifact.
+    // Uses REG[F0h]/[F1h] vsync interrupt flag (INTC1/INTC2 per RA8876/LT7680
+    // register map). timeout_ms caps the wait in case vsync never fires.
+    void waitVSync(uint32_t timeout_ms = 50);
+
     // Switch the SDRAM address that the panel scans out for display.
     // Address must be 4-byte aligned.
     void setMainImageAddress(uint32_t addr);
+
+    // Read back the current MISA value from the chip.
+    uint32_t readMainImageAddress(void);
 
     // Switch the SDRAM address that subsequent draws (and readRect) target.
     // Address must be 4-byte aligned. Use to direct ops into a frame slot
@@ -128,6 +138,59 @@ namespace lgfx
     // the LovyanGFX pixelcopy machinery. Use this for bulk transfers where
     // the source is already in the panel's wire format (e.g. SD load path).
     void writeRawPixels(uint16_t x, uint16_t y, uint16_t w, const uint16_t* data);
+
+    // Stream a full w×h RGB565 frame to the canvas in one SPI burst.
+    // Sets the window to (0,0,w-1,h-1), kicks _start_memorywrite once, then
+    // streams all w*h pixels without any per-row transaction overhead.
+    // The canvas address must already be set to the target slot by the caller.
+    void writeRawFrame(const uint16_t* data, uint16_t w, uint16_t h);
+
+    // Stream a full 8bpp frame (RGB332 CLUT indices, one byte per pixel) to
+    // the canvas using a single CS-held DMA burst.
+    //   Protocol: after CS asserts the LT7680 parses ONLY the first byte as a
+    //   command byte; 0x80 (A0=1, RW#=0) enters "write to REG[04h]" mode and
+    //   every subsequent byte with CS held goes directly to SDRAM (auto-inc).
+    //   Packs [0x80][clut8[0]] as the first 16-bit write then DMA-streams the
+    //   remaining count-1 bytes — no per-byte CS toggling.
+    // clut8  – count bytes of RGB332 palette indices (matches _init_clut_rgb332)
+    // count  – must equal panel_width * panel_height
+    // The canvas address must already be set to the target slot by the caller.
+    void writeRawFrame8bpp(const uint8_t* clut8, uint32_t count);
+
+    // Diagnostic: same effect as writeRawFrame8bpp, but writes one row at a
+    // time inside a 480x1 active window, instead of one 230,400-byte burst.
+    void writeRawFrame8bppRowByRow(const uint8_t* clut8);
+
+    // ---- Serial Flash public API (§10.2 SPI Master + §10.3 DMA) --------
+
+    // Read 3-byte JEDEC ID (manufacturer, memory type, capacity).
+    // Logs result to Serial. Returns 0xFFFFFF if no response.
+    uint32_t flashReadJEDECID(void);
+
+    // Erase one 4 KB sector. Blocks until erase completes or timeout.
+    void flashEraseSector(uint32_t addr);
+
+    // Program up to 256 bytes into one flash page. addr must be within a
+    // single 256-byte page (caller is responsible for alignment).
+    // Blocks until program completes or timeout.
+    void flashPageProgram(uint32_t addr, const uint8_t* data, uint16_t len);
+
+    // Read len bytes from flash via SPI Master (slow path — for verification).
+    void flashReadBytes(uint32_t addr, uint8_t* buf, uint16_t len);
+
+    // DMA a rectangular pixel block from Serial Flash to an SDRAM canvas
+    // (§10.3.3, Fig 10-12 polling mode).
+    //   flash_addr       – source byte address in flash
+    //   flash_src_width  – pixel width of the image stored in flash
+    //   canvas_dst_addr  – SDRAM start address of the destination canvas
+    //   dst_x, dst_y     – top-left corner inside that canvas
+    //   block_w, block_h – block dimensions to transfer
+    // The drawing canvas (CVSSA) is restored to its previous value after DMA.
+    void dmaFlashBlock(uint32_t flash_addr,
+                       uint16_t flash_src_width,
+                       uint32_t canvas_dst_addr,
+                       uint16_t dst_x, uint16_t dst_y,
+                       uint16_t block_w, uint16_t block_h);
     // ---------------------------------------------------------------------
 
     color_depth_t setColorDepth(color_depth_t depth) override;
@@ -165,11 +228,13 @@ namespace lgfx
     bool     _in_transaction  = false;
     bool     _flg_memorywrite = false;
 
+
     // Mirror of REG[50h] CVSSA (Canvas Start Address). All BTE source/dest
     // and GDE-clipped fills must read from here so that draws follow whatever
     // SDRAM slot setCanvasAddress() last selected. Hardcoding the base address
     // (slot 0) makes setCanvasAddress() a no-op for fill rects and copyRect.
     uint32_t _canvas_addr = 0;
+    uint8_t  _reg02       = 0x40;  // current REG[02h] value (set by setRotation)
 
     const uint8_t* getInitCommands(uint8_t listno) const override { return nullptr; }
 
@@ -188,7 +253,8 @@ namespace lgfx
     void _set_active_window(uint16_t x, uint16_t y, uint16_t w, uint16_t h);
     void _start_memorywrite(void);
     void _set_forecolor(uint32_t rawcolor);
-    void _write_pixel16(uint16_t color);
+    void _write_pixel16(uint16_t color);  // converts RGB565→RGB332 index, writes 1 byte (8bpp)
+    void _init_clut_rgb332(void);         // programs the 256-entry RGB332 CLUT at startup
 
     // Read one byte from the LT7680 memory port via the [0xC0] prefix
     // CS-toggled 16-bit transaction.
@@ -202,6 +268,33 @@ namespace lgfx
     // Bit-bang the ST7701S 9-bit serial init sequence on the shared SPI pins.
     // The LovyanGFX bus must be released before calling and re-init'd after.
     void _st7701s_init_sequence(void);
+
+    // ---- SPI Master helpers (§10.2, REG[B8h–BBh]) -----------------------
+    // Select a register without writing data (needed to prime [0xC0] reads).
+    void _select_reg(uint8_t reg);
+    // Select + read one byte from that register.
+    uint8_t _read_reg_byte(uint8_t reg);
+
+    // Assert / deassert SFCS1# via SPIMCR2 (REG[B9h]).
+    // Assert also deasserts first to reset both TX and RX FIFOs (§10.2).
+    void _spi_cs_assert(void);
+    void _spi_cs_deassert(void);
+
+    // Write one byte to the TX FIFO (REG[B8h] = SPIDR).
+    void _spi_tx(uint8_t data);
+
+    // Poll SPIMSR (BAh) until TX FIFO empty (bit7=1).
+    // Returns the final SPIMSR byte; logs a warning on timeout.
+    uint8_t _spi_wait_done(void);
+
+    // Send len bytes in ≤16-byte chunks (FIFO depth); RX bytes discarded.
+    void _spi_write_buf(const uint8_t* buf, uint16_t len);
+
+    // Send WREN (06h) command.
+    void _flash_write_enable(void);
+
+    // Poll Status Register 1 (RDSR 05h) until WIP=0. Returns false on timeout.
+    bool _flash_wait_ready(uint32_t timeout_ms = 5000);
   };
 
 //----------------------------------------------------------------------------

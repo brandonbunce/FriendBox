@@ -1,212 +1,46 @@
 #include "ui_core.hpp"
 #include "ui_screen_canvas_menu.hpp"
+#include "ui_screen_send.hpp"
+#include "ui_screen_file_browser.hpp"
 #include "display.hpp"
 #include "canvas.hpp"
 #include "io.hpp"
 #include "network.hpp"
 
-UIList friendListUI;
-UIList fileListUI;
-
 std::vector<UIButton *> uiButtons;
 UIButton *lastPressedButton;
 screen_id_t currentScreen = SCREEN_STARTUP;
-screen_id_t lastScreen; // Used by drawFriendboxLoadingScreen to return to previous context after showing loading screen.
+screen_id_t lastScreen;
 
-/* SCREEN_SEND */
-UIButton SCREEN_SEND_ADDRESSBOOK_BUTTON[SCREEN_SEND_ADDRESSBOOK_BUTTON_COUNT];
-static const char *SCREEN_SEND_ADDRESSBOOK_BUTTON_LABEL[SCREEN_SEND_ADDRESSBOOK_BUTTON_COUNT] = {"Friend One", "Friend Two", "Friend Three", "Friend Four", "Friend Five"};
-UIButton SCREEN_SEND_NAVI_BUTTON[SCREEN_SEND_NAVI_BUTTON_COUNT];
-static const char *SCREEN_SEND_NAVI_BUTTON_LABEL[SCREEN_SEND_NAVI_BUTTON_COUNT] = {"Canvas", "Refresh", "Sort", "/\\", "\\/"};
-
-/* SCREEN_FILE_BROWSER */
-UIButton SCREEN_FILE_BROWSER_FILE_BUTTON[SCREEN_FILE_BROWSER_FILE_BUTTON_COUNT];
-static const char *SCREEN_FILE_BROWSER_FILE_BUTTON_LABEL[SCREEN_FILE_BROWSER_FILE_BUTTON_COUNT] = {"File One", "File Two", "File Three", "File Four", "File Five"};
-UIButton SCREEN_FILE_BROWSER_NAVI_BUTTON[SCREEN_FILE_BROWSER_NAVI_BUTTON_COUNT];
-static const char *SCREEN_FILE_BROWSER_NAVI_BUTTON_LABEL[SCREEN_FILE_BROWSER_NAVI_BUTTON_COUNT] = {"Back", "Sort", "/\\", "\\/"};
+static bool s_initialized[10] = {};
 
 bool handleUIButtonPress(UIButton *targetButton, ui_button_mode_id_t buttonMode)
 {
-    // 1. Check if currently touching
     bool isTouching = touchZ && targetButton->button.contains(touchX, touchY);
-
-    // 2. Update button state (this is what makes justPressed/justReleased work)
     targetButton->button.press(isTouching);
 
-    // 3. Check for state transitions
     bool justReleased = targetButton->button.justReleased();
-    bool justPressed = targetButton->button.justPressed();
+    bool justPressed  = targetButton->button.justPressed();
 
-    // 4. Draw visual feedback
-    if (justReleased)
-    {
-        targetButton->button.drawButton(false);
-    }
+    if (justReleased) targetButton->button.drawButton(false);
     if (justPressed)
     {
         targetButton->button.drawButton(true);
         lastPressedButton = targetButton;
     }
 
-    // 5. Return based on mode
     switch (buttonMode)
     {
-    case ACT_ON_PRESS:
-        return justPressed; // Now correctly returns true only ONCE
-
-    case ACT_ON_RELEASE:
-        return justReleased;
-
-    case ACT_ON_HOVER_AND_RELEASE:
-        return justReleased && !touchZ;
-
-    default:
-        return false;
-    }
-}
-
-static void handleTouchUIUpdateScreenSend()
-{
-    for (uint8_t b = 0; b < SCREEN_SEND_NAVI_BUTTON_COUNT; b++)
-    {
-        switch (b)
-        {
-        case 0: // Canvas
-            if (handleUIButtonPress(&SCREEN_SEND_NAVI_BUTTON[b], ACT_ON_PRESS))
-            {
-                changeScreenContext(SCREEN_CANVAS_MENU);
-            }
-            break;
-        case 1: // Refresh
-            if (handleUIButtonPress(&SCREEN_SEND_NAVI_BUTTON[b], ACT_ON_PRESS))
-            {
-                drawScreenSend(friendListUI.page);
-            }
-            break;
-        case 2: // Sort
-                // Not implemented yet.
-        case 3: // Up
-            if (friendListUI.page > 0)
-            {
-                if (handleUIButtonPress(&SCREEN_SEND_NAVI_BUTTON[b], ACT_ON_PRESS))
-                {
-                    drawScreenSend(friendListUI.page - 1);
-                }
-            }
-            break;
-        case 4: // Down
-            if ((friendListUI.page + 1) * SCREEN_SEND_ADDRESSBOOK_BUTTON_COUNT < friendListUI.listItems.size())
-            {
-                if (handleUIButtonPress(&SCREEN_SEND_NAVI_BUTTON[b], ACT_ON_PRESS))
-                {
-                    drawScreenSend(friendListUI.page + 1);
-                }
-            }
-            break;
-        default:
-            // Not implemented yet.
-            break;
-        }
-    }
-
-    for (uint8_t b = 0; b < SCREEN_SEND_ADDRESSBOOK_BUTTON_COUNT; b++)
-    {
-        if (handleUIButtonPress(&SCREEN_SEND_ADDRESSBOOK_BUTTON[b], ACT_ON_PRESS))
-        {
-            switch (b)
-            {
-            case 0:
-                drawFriendboxLoadingScreen("Sending...", 0);
-                if (networkSendCanvas())
-                {
-                    drawFriendboxLoadingScreen("Sent!", 500);
-                    delay(500);
-                }
-                else
-                {
-                    drawFriendboxLoadingScreen("Failed to send.", 1000);
-                    delay(500);
-                }
-                changeScreenContext(SCREEN_SEND);
-                break;
-            case 1:
-            case 2:
-            case 3:
-            case 4:
-                break;
-            default:
-                networkSendFramebuffer(b);
-                break;
-            }
-        }
-    }
-}
-
-static void handleTouchUIUpdateScreenFileBrowser()
-{
-    for (uint8_t b = 0; b < SCREEN_FILE_BROWSER_NAVI_BUTTON_COUNT; b++)
-    {
-        switch (b)
-        {
-        case 0: // Back
-            if (handleUIButtonPress(&SCREEN_FILE_BROWSER_NAVI_BUTTON[b], ACT_ON_PRESS))
-            {
-                changeScreenContext(SCREEN_CANVAS_MENU);
-            }
-            break;
-        case 1: // Sort
-                // Not implemented yet.
-        case 2: // Up
-            if (fileListUI.page > 0)
-            {
-                if (handleUIButtonPress(&SCREEN_FILE_BROWSER_NAVI_BUTTON[b], ACT_ON_PRESS))
-                {
-                    drawScreenFileBrowser(fileListUI.page - 1);
-                }
-            }
-            break;
-        case 3: // Down
-            if ((fileListUI.page + 1) * SCREEN_FILE_BROWSER_FILE_BUTTON_COUNT < fileListUI.listItems.size())
-            {
-                if (handleUIButtonPress(&SCREEN_FILE_BROWSER_NAVI_BUTTON[b], ACT_ON_PRESS))
-                {
-                    drawScreenFileBrowser(fileListUI.page + 1);
-                }
-            }
-            break;
-        default:
-            break;
-        }
-    }
-    for (uint8_t b = 0; b < SCREEN_FILE_BROWSER_FILE_BUTTON_COUNT; b++)
-    {
-        if (handleUIButtonPress(&SCREEN_FILE_BROWSER_FILE_BUTTON[b], ACT_ON_PRESS))
-        {
-            int fileIndex = b + (fileListUI.page * SCREEN_FILE_BROWSER_FILE_BUTTON_COUNT);
-
-            if (fileIndex < fileListUI.listItems.size())
-            {
-                const char *filename = fileListUI.listItems[fileIndex].c_str();
-                Serial.printf("Select Filename [%d]: %s\n", fileIndex, filename);
-
-                changeScreenContext(SCREEN_CANVAS);
-                //loadSketchFromSD(filename);
-                changeScreenContext(SCREEN_FILE_BROWSER);
-                drawScreenFileBrowser(fileListUI.page);
-            }
-            else
-            {
-                Serial.printf("ERROR: Index %d out of bounds (size: %d)\n",
-                              fileIndex, fileListUI.listItems.size());
-            }
-        }
+    case ACT_ON_PRESS:           return justPressed;
+    case ACT_ON_RELEASE:         return justReleased;
+    case ACT_ON_HOVER_AND_RELEASE: return justReleased && !touchZ;
+    default:                     return false;
     }
 }
 
 // Aim the panel at SLOT_CANVAS for both display + draw. Used by every screen
-// that doesn't keep its own backing slot. Coming back from CANVAS_MENU this is
-// what makes the overlay disappear: a single register write, no fillRect.
-static void useCanvasSlot()
+// that doesn't keep its own backing slot.
+void useCanvasSlot()
 {
     tft.setCanvasAddress(LT7680_SLOT_CANVAS);
     tft.setMainImageAddress(LT7680_SLOT_CANVAS);
@@ -217,44 +51,23 @@ static void onEnterScreenCanvas()
     useCanvasSlot();
 }
 
-static void onEnterScreenSend()
-{
-    useCanvasSlot();
-}
-
-static void onEnterScreenFileBrowser()
-{
-    useCanvasSlot();
-    fileListUI.page = 0;
-    fileListUI.listItems = sdGetFboxFiles();
-}
-
-static void drawScreenSendDefaultPage() { drawScreenSend(); }
-static void drawScreenFileBrowserDefaultPage() { drawScreenFileBrowser(); }
-
-// Forward decls for the registry — defined further below.
-static void initUIForScreenSend();
-static void initUIForScreenFileBrowser();
-
 const ScreenHandlers screens[] = {
-    /* SCREEN_CANVAS             */ {"SCREEN_CANVAS",             true,  false, nullptr,                    onEnterScreenCanvas,      nullptr,                          nullptr,                              nullptr},
-    /* SCREEN_CANVAS_MENU        */ {"SCREEN_CANVAS_MENU",        true,  false, initUIForScreenCanvasMenu,  onEnterScreenCanvasMenu,  drawScreenCanvasMenu,             handleTouchUIUpdateScreenCanvasMenu,  activeSubcontextScreenCanvasMenu},
-    /* SCREEN_CANVAS_SIZE_SELECT */ {"SCREEN_CANVAS_SIZE_SELECT", false, false, nullptr,                    nullptr,                  nullptr,                          nullptr,                              nullptr},
-    /* SCREEN_SEND               */ {"SCREEN_SEND",               true,  false, initUIForScreenSend,        onEnterScreenSend,        drawScreenSendDefaultPage,        handleTouchUIUpdateScreenSend,        nullptr},
-    /* SCREEN_FILE_BROWSER       */ {"SCREEN_FILE_BROWSER",       true,  false, initUIForScreenFileBrowser, onEnterScreenFileBrowser, drawScreenFileBrowserDefaultPage, handleTouchUIUpdateScreenFileBrowser, nullptr},
-    /* SCREEN_SYSTEM_MESSAGE     */ {"SCREEN_SYSTEM_MESSAGE",     true,  true,  nullptr,                    nullptr,                  nullptr,                          nullptr,                              nullptr},
-    /* SCREEN_RECEIVED           */ {"SCREEN_RECEIVED",           false, false, nullptr,                    nullptr,                  nullptr,                          nullptr,                              nullptr},
-    /* SCREEN_WELCOME            */ {"SCREEN_WELCOME",            false, false, nullptr,                    nullptr,                  nullptr,                          nullptr,                              nullptr},
-    /* SCREEN_STARTUP            */ {"SCREEN_STARTUP",            false, false, nullptr,                    nullptr,                  nullptr,                          nullptr,                              nullptr},
-    /* SCREEN_NETWORK_SETTINGS   */ {"SCREEN_NETWORK_SETTINGS",   false, false, nullptr,                    nullptr,                  nullptr,                          nullptr,                              nullptr},
+    /* SCREEN_CANVAS             */ {"SCREEN_CANVAS",             true,  false, nullptr,                    onEnterScreenCanvas,      nullptr,                        nullptr,                              nullptr},
+    /* SCREEN_CANVAS_MENU        */ {"SCREEN_CANVAS_MENU",        true,  false, initUIForScreenCanvasMenu,  onEnterScreenCanvasMenu,  drawScreenCanvasMenu,           handleTouchUIUpdateScreenCanvasMenu,  activeSubcontextScreenCanvasMenu},
+    /* SCREEN_CANVAS_SIZE_SELECT */ {"SCREEN_CANVAS_SIZE_SELECT", false, false, nullptr,                    nullptr,                  nullptr,                        nullptr,                              nullptr},
+    /* SCREEN_SEND               */ {"SCREEN_SEND",               true,  false, initUIForScreenSend,        onEnterScreenSend,        drawScreenSendDefault,          handleTouchUIUpdateScreenSend,        nullptr},
+    /* SCREEN_FILE_BROWSER       */ {"SCREEN_FILE_BROWSER",       true,  false, initUIForScreenFileBrowser, onEnterScreenFileBrowser, drawScreenFileBrowserDefault,   handleTouchUIUpdateScreenFileBrowser, nullptr},
+    /* SCREEN_SYSTEM_MESSAGE     */ {"SCREEN_SYSTEM_MESSAGE",     true,  true,  nullptr,                    nullptr,                  nullptr,                        nullptr,                              nullptr},
+    /* SCREEN_RECEIVED           */ {"SCREEN_RECEIVED",           false, false, nullptr,                    nullptr,                  nullptr,                        nullptr,                              nullptr},
+    /* SCREEN_WELCOME            */ {"SCREEN_WELCOME",            false, false, nullptr,                    nullptr,                  nullptr,                        nullptr,                              nullptr},
+    /* SCREEN_STARTUP            */ {"SCREEN_STARTUP",            false, false, nullptr,                    nullptr,                  nullptr,                        nullptr,                              nullptr},
+    /* SCREEN_NETWORK_SETTINGS   */ {"SCREEN_NETWORK_SETTINGS",   false, false, nullptr,                    nullptr,                  nullptr,                        nullptr,                              nullptr},
 };
 
 void handleTouchUIUpdate()
 {
     if (screens[currentScreen].handleTouch)
-    {
         screens[currentScreen].handleTouch();
-    }
 }
 
 std::string getUIContextName(screen_id_t screenContext)
@@ -291,41 +104,38 @@ void changeScreenContext(screen_id_t targetScreen)
     currentScreen = targetScreen;
     initUIForScreen(targetScreen);
     if (h.onEnter) h.onEnter();
-    if (h.draw) h.draw();
+    if (h.draw)    h.draw();
 }
 
 void drawFriendboxLoadingScreen(const char *subtitle, int holdTimeMs, const char *subsubtitle, const char *subsubsubtitle)
 {
-    lastScreen = currentScreen;                 // Store last screen to return to after showing loading screen.
-    if (currentScreen != SCREEN_SYSTEM_MESSAGE) changeScreenContext(SCREEN_SYSTEM_MESSAGE); // Change context to system message for loading screen.
+    lastScreen = currentScreen;
+    if (currentScreen != SCREEN_SYSTEM_MESSAGE) changeScreenContext(SCREEN_SYSTEM_MESSAGE);
     tft.fillScreen(draw_color_palette[currentDrawColorIndex]);
     tft.setTextColor(draw_color_palette_text_color[currentDrawColorIndex], draw_color_palette[currentDrawColorIndex]);
     tft.setTextSize(5);
     tft.drawCenterString("FriendBox", 240, 120);
     tft.setTextSize(3);
     tft.drawCenterString(subtitle, 240, 180);
-    if (subsubtitle != "")
+    if (subsubtitle[0] != '\0')
     {
         tft.setTextSize(3);
         tft.drawCenterString(subsubtitle, 240, 240);
     }
-    if (subsubsubtitle != "")
+    if (subsubsubtitle[0] != '\0')
     {
         tft.setTextSize(2);
         tft.setTextWrap(true);
         tft.drawCenterString(subsubsubtitle, 240, 270);
     }
-    delay(holdTimeMs);               // Wait a moment if specified.
-    if (currentScreen != SCREEN_SYSTEM_MESSAGE) changeScreenContext(lastScreen); // Return to previous context after showing loading screen.
+    delay(holdTimeMs);
+    if (currentScreen != SCREEN_SYSTEM_MESSAGE) changeScreenContext(lastScreen);
 }
 
 void initUIForScreen(screen_id_t targetScreen)
 {
-    if (!screens[targetScreen].init)
-    {
-        return;
-    }
-    if (checkIfUIIsInitialized(targetScreen))
+    if (!screens[targetScreen].init) return;
+    if (s_initialized[targetScreen])
     {
         Serial.print("UI already initialized for ");
         Serial.print(screens[targetScreen].name);
@@ -336,368 +146,7 @@ void initUIForScreen(screen_id_t targetScreen)
     Serial.print(screens[targetScreen].name);
     Serial.println(", initializing...");
     screens[targetScreen].init();
-}
-
-static void initUIForScreenSend()
-{
-    for (int col = 0; col < SCREEN_SEND_ADDRESSBOOK_BUTTON_COUNT; col++)
-    {
-        SCREEN_SEND_ADDRESSBOOK_BUTTON[col].x = 10;
-        SCREEN_SEND_ADDRESSBOOK_BUTTON[col].y = 60 * col + 15;
-        SCREEN_SEND_ADDRESSBOOK_BUTTON[col].w = 300;
-        SCREEN_SEND_ADDRESSBOOK_BUTTON[col].h = 50;
-        SCREEN_SEND_ADDRESSBOOK_BUTTON[col].fillColor = (int)draw_color_palette[currentDrawColorIndex];
-        SCREEN_SEND_ADDRESSBOOK_BUTTON[col].screenContext = SCREEN_SEND;
-        SCREEN_SEND_ADDRESSBOOK_BUTTON[col].subcontext = 0;
-        SCREEN_SEND_ADDRESSBOOK_BUTTON[col].button.initButtonUL(&tft, SCREEN_SEND_ADDRESSBOOK_BUTTON[col].x, SCREEN_SEND_ADDRESSBOOK_BUTTON[col].y,
-                                                                SCREEN_SEND_ADDRESSBOOK_BUTTON[col].w, SCREEN_SEND_ADDRESSBOOK_BUTTON[col].h, TFT_WHITE,
-                                                                SCREEN_SEND_ADDRESSBOOK_BUTTON[col].fillColor, (int)draw_color_palette_text_color[currentDrawColorIndex],
-                                                                "Working...", 2, 2);
-        uiButtons.push_back(&SCREEN_SEND_ADDRESSBOOK_BUTTON[col]);
-    }
-
-    for (int col = 0; col < SCREEN_SEND_NAVI_BUTTON_COUNT; col++)
-    {
-        SCREEN_SEND_NAVI_BUTTON[col].x = 350;
-        SCREEN_SEND_NAVI_BUTTON[col].y = 60 * col + 15;
-        SCREEN_SEND_NAVI_BUTTON[col].w = 100;
-        SCREEN_SEND_NAVI_BUTTON[col].h = 50;
-        SCREEN_SEND_NAVI_BUTTON[col].fillColor = (int)draw_color_palette[currentDrawColorIndex];
-        SCREEN_SEND_NAVI_BUTTON[col].screenContext = SCREEN_SEND;
-        SCREEN_SEND_NAVI_BUTTON[col].subcontext = 0;
-        SCREEN_SEND_NAVI_BUTTON[col].button.initButtonUL(&tft, SCREEN_SEND_NAVI_BUTTON[col].x, SCREEN_SEND_NAVI_BUTTON[col].y,
-                                                         SCREEN_SEND_NAVI_BUTTON[col].w, SCREEN_SEND_NAVI_BUTTON[col].h, TFT_WHITE,
-                                                         SCREEN_SEND_NAVI_BUTTON[col].fillColor, (int)draw_color_palette_text_color[currentDrawColorIndex],
-                                                         SCREEN_SEND_NAVI_BUTTON_LABEL[col], 2, 2);
-        uiButtons.push_back(&SCREEN_SEND_NAVI_BUTTON[col]);
-    }
-}
-
-static void initUIForScreenFileBrowser()
-{
-    for (int col = 0; col < SCREEN_FILE_BROWSER_FILE_BUTTON_COUNT; col++)
-    {
-        SCREEN_FILE_BROWSER_FILE_BUTTON[col].x = 10;
-        SCREEN_FILE_BROWSER_FILE_BUTTON[col].y = 60 * col + 15;
-        SCREEN_FILE_BROWSER_FILE_BUTTON[col].w = 300;
-        SCREEN_FILE_BROWSER_FILE_BUTTON[col].h = 50;
-        SCREEN_FILE_BROWSER_FILE_BUTTON[col].fillColor = (int)draw_color_palette[currentDrawColorIndex];
-        SCREEN_FILE_BROWSER_FILE_BUTTON[col].screenContext = SCREEN_FILE_BROWSER;
-        SCREEN_FILE_BROWSER_FILE_BUTTON[col].subcontext = 0;
-        SCREEN_FILE_BROWSER_FILE_BUTTON[col].button.initButtonUL(&tft, SCREEN_FILE_BROWSER_FILE_BUTTON[col].x, SCREEN_FILE_BROWSER_FILE_BUTTON[col].y,
-                                                                 SCREEN_FILE_BROWSER_FILE_BUTTON[col].w, SCREEN_FILE_BROWSER_FILE_BUTTON[col].h, TFT_WHITE,
-                                                                 SCREEN_FILE_BROWSER_FILE_BUTTON[col].fillColor, (int)draw_color_palette_text_color[currentDrawColorIndex],
-                                                                 "File Name", 2, 2);
-        uiButtons.push_back(&SCREEN_FILE_BROWSER_FILE_BUTTON[col]);
-    }
-
-    for (int col = 0; col < SCREEN_FILE_BROWSER_NAVI_BUTTON_COUNT; col++)
-    {
-        SCREEN_FILE_BROWSER_NAVI_BUTTON[col].x = 350;
-        SCREEN_FILE_BROWSER_NAVI_BUTTON[col].y = 60 * col + 15;
-        SCREEN_FILE_BROWSER_NAVI_BUTTON[col].w = 100;
-        SCREEN_FILE_BROWSER_NAVI_BUTTON[col].h = 50;
-        SCREEN_FILE_BROWSER_NAVI_BUTTON[col].fillColor = (int)draw_color_palette[currentDrawColorIndex];
-        SCREEN_FILE_BROWSER_NAVI_BUTTON[col].screenContext = SCREEN_FILE_BROWSER;
-        SCREEN_FILE_BROWSER_NAVI_BUTTON[col].subcontext = 0;
-        SCREEN_FILE_BROWSER_NAVI_BUTTON[col].button.initButtonUL(&tft, SCREEN_FILE_BROWSER_NAVI_BUTTON[col].x, SCREEN_FILE_BROWSER_NAVI_BUTTON[col].y,
-                                                                 SCREEN_FILE_BROWSER_NAVI_BUTTON[col].w, SCREEN_FILE_BROWSER_NAVI_BUTTON[col].h, TFT_WHITE,
-                                                                 SCREEN_FILE_BROWSER_NAVI_BUTTON[col].fillColor, (int)draw_color_palette_text_color[currentDrawColorIndex],
-                                                                 SCREEN_FILE_BROWSER_NAVI_BUTTON_LABEL[col], 2, 2);
-        uiButtons.push_back(&SCREEN_FILE_BROWSER_NAVI_BUTTON[col]);
-    }
-}
-
-void drawScreenFileBrowser(int page)
-{
-    Serial.print("Drawing SCREEN_FILE_BROWSER on page ");
-    Serial.println(page);
-    if (!SCREEN_FILE_BROWSER_FILE_BUTTON[0].isDrawn || fileListUI.page != page)
-    {
-        for (int col = 0; col < SCREEN_FILE_BROWSER_FILE_BUTTON_COUNT; col++)
-        {
-            // Always erase the button area
-            /*drawFramebuffer(SCREEN_FILE_BROWSER_FILE_BUTTON[col].x,
-                            SCREEN_FILE_BROWSER_FILE_BUTTON[col].y,
-                            SCREEN_FILE_BROWSER_FILE_BUTTON[col].w,
-                            SCREEN_FILE_BROWSER_FILE_BUTTON[col].h);*/
-
-            int fileIndex = col + (page * SCREEN_FILE_BROWSER_FILE_BUTTON_COUNT);
-
-            // Check if we have a file for this button
-            if (fileIndex < fileListUI.listItems.size())
-            {
-                // Draw the button with file name
-                SCREEN_FILE_BROWSER_FILE_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
-                SCREEN_FILE_BROWSER_FILE_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
-                SCREEN_FILE_BROWSER_FILE_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
-                SCREEN_FILE_BROWSER_FILE_BUTTON[col].button.drawButton(false, fileListUI.listItems[fileIndex].c_str());
-                SCREEN_FILE_BROWSER_FILE_BUTTON[col].isDrawn = true;
-            }
-            else
-            {
-                // No friend for this slot, leave erased
-                SCREEN_FILE_BROWSER_FILE_BUTTON[col].isDrawn = false;
-            }
-        }
-    }
-    if (!SCREEN_FILE_BROWSER_NAVI_BUTTON[0].isDrawn || fileListUI.page != page)
-    {
-        for (int col = 0; col < SCREEN_FILE_BROWSER_NAVI_BUTTON_COUNT; col++)
-        {
-            switch (col)
-            {
-            case 0: // Back
-            case 1: // Sort
-                SCREEN_FILE_BROWSER_NAVI_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
-                SCREEN_FILE_BROWSER_NAVI_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
-                SCREEN_FILE_BROWSER_NAVI_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
-                SCREEN_FILE_BROWSER_NAVI_BUTTON[col].button.drawButton();
-                SCREEN_FILE_BROWSER_NAVI_BUTTON[col].isDrawn = true;
-                break;
-            case 2: // Up
-                Serial.println("Drawing over previous up button.");
-                /*drawFramebuffer(SCREEN_FILE_BROWSER_NAVI_BUTTON[col].x,
-                                SCREEN_FILE_BROWSER_NAVI_BUTTON[col].y,
-                                SCREEN_FILE_BROWSER_NAVI_BUTTON[col].w,
-                                SCREEN_FILE_BROWSER_NAVI_BUTTON[col].h);*/
-                if (page > 0)
-                {
-                    Serial.print("Drawing up buttons because page is ");
-                    Serial.println(page);
-                    SCREEN_FILE_BROWSER_NAVI_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
-                    SCREEN_FILE_BROWSER_NAVI_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
-                    SCREEN_FILE_BROWSER_NAVI_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
-                    SCREEN_FILE_BROWSER_NAVI_BUTTON[col].button.drawButton();
-                    SCREEN_FILE_BROWSER_NAVI_BUTTON[col].isDrawn = true;
-                }
-                else
-                {
-                    SCREEN_FILE_BROWSER_NAVI_BUTTON[col].isDrawn = false;
-                }
-                break;
-            case 3: // Down
-                /*drawFramebuffer(SCREEN_FILE_BROWSER_NAVI_BUTTON[col].x,
-                                SCREEN_FILE_BROWSER_NAVI_BUTTON[col].y,
-                                SCREEN_FILE_BROWSER_NAVI_BUTTON[col].w,
-                                SCREEN_FILE_BROWSER_NAVI_BUTTON[col].h);*/
-                if ((page + 1) * 5 < fileListUI.listItems.size())
-                {
-                    Serial.print("Drawing down button because ");
-                    Serial.print((page + 1) * SCREEN_FILE_BROWSER_FILE_BUTTON_COUNT);
-                    Serial.print(" < ");
-                    Serial.println(fileListUI.listItems.size());
-                    SCREEN_FILE_BROWSER_NAVI_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
-                    SCREEN_FILE_BROWSER_NAVI_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
-                    SCREEN_FILE_BROWSER_NAVI_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
-                    SCREEN_FILE_BROWSER_NAVI_BUTTON[col].button.drawButton();
-                    SCREEN_FILE_BROWSER_NAVI_BUTTON[col].isDrawn = true;
-                }
-                else
-                {
-                    SCREEN_FILE_BROWSER_NAVI_BUTTON[col].isDrawn = false;
-                }
-                break;
-            default:
-                break;
-            }
-        }
-    }
-    fileListUI.page = page;
-}
-
-
-void drawScreenSend(int page)
-{
-    Serial.print("Drawing SCREEN_SEND on page ");
-    Serial.println(page);
-    friendListUI.listItems = networkGetFriends();
-    if (!SCREEN_SEND_ADDRESSBOOK_BUTTON[0].isDrawn || friendListUI.page != page)
-    {
-        for (int col = 0; col < SCREEN_SEND_ADDRESSBOOK_BUTTON_COUNT; col++)
-        {
-            // Always erase the button area
-            /*drawFramebuffer(SCREEN_SEND_ADDRESSBOOK_BUTTON[col].x,
-                            SCREEN_SEND_ADDRESSBOOK_BUTTON[col].y,
-                            SCREEN_SEND_ADDRESSBOOK_BUTTON[col].w,
-                            SCREEN_SEND_ADDRESSBOOK_BUTTON[col].h);*/
-
-            int friendIndex = col + (page * SCREEN_SEND_ADDRESSBOOK_BUTTON_COUNT);
-
-            // Check if we have a friend for this button
-            if (friendIndex < friendListUI.listItems.size())
-            {
-                // Draw the button with friend name
-                SCREEN_SEND_ADDRESSBOOK_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
-                SCREEN_SEND_ADDRESSBOOK_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
-                SCREEN_SEND_ADDRESSBOOK_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
-                SCREEN_SEND_ADDRESSBOOK_BUTTON[col].button.drawButton(false, friendListUI.listItems[friendIndex].c_str());
-                SCREEN_SEND_ADDRESSBOOK_BUTTON[col].isDrawn = true;
-            }
-            else
-            {
-                // No friend for this slot, leave erased
-                SCREEN_SEND_ADDRESSBOOK_BUTTON[col].isDrawn = false;
-            }
-        }
-    }
-    if (!SCREEN_SEND_NAVI_BUTTON[0].isDrawn || friendListUI.page != page)
-    {
-        for (int col = 0; col < SCREEN_SEND_NAVI_BUTTON_COUNT; col++)
-        {
-            switch (col)
-            {
-            case 0: // Canvas
-            case 1: // Refresh
-            case 2: // Sort
-                SCREEN_SEND_NAVI_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
-                SCREEN_SEND_NAVI_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
-                SCREEN_SEND_NAVI_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
-                SCREEN_SEND_NAVI_BUTTON[col].button.drawButton();
-                SCREEN_SEND_NAVI_BUTTON[col].isDrawn = true;
-                break;
-            case 3: // Up
-                Serial.println("Drawing over previous up button.");
-                /*drawFramebuffer(SCREEN_SEND_NAVI_BUTTON[col].x,
-                                SCREEN_SEND_NAVI_BUTTON[col].y,
-                                SCREEN_SEND_NAVI_BUTTON[col].w,
-                                SCREEN_SEND_NAVI_BUTTON[col].h);*/
-                if (page > 0)
-                {
-                    Serial.print("Drawing up buttons because page is ");
-                    Serial.println(page);
-                    SCREEN_SEND_NAVI_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
-                    SCREEN_SEND_NAVI_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
-                    SCREEN_SEND_NAVI_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
-                    SCREEN_SEND_NAVI_BUTTON[col].button.drawButton();
-                    SCREEN_SEND_NAVI_BUTTON[col].isDrawn = true;
-                }
-                else
-                {
-                    SCREEN_SEND_NAVI_BUTTON[col].isDrawn = false;
-                }
-                break;
-            case 4: // Down
-                /*drawFramebuffer(SCREEN_SEND_NAVI_BUTTON[col].x,
-                                SCREEN_SEND_NAVI_BUTTON[col].y,
-                                SCREEN_SEND_NAVI_BUTTON[col].w,
-                                SCREEN_SEND_NAVI_BUTTON[col].h);*/
-                if ((page + 1) * 5 < friendListUI.listItems.size())
-                {
-                    SCREEN_SEND_NAVI_BUTTON[col].fillColor = draw_color_palette[currentDrawColorIndex];
-                    SCREEN_SEND_NAVI_BUTTON[col].button.setTextColor(draw_color_palette_text_color[currentDrawColorIndex]);
-                    SCREEN_SEND_NAVI_BUTTON[col].button.setFillColor(draw_color_palette[currentDrawColorIndex]);
-                    SCREEN_SEND_NAVI_BUTTON[col].button.drawButton();
-                    SCREEN_SEND_NAVI_BUTTON[col].isDrawn = true;
-                }
-                else
-                {
-                    SCREEN_SEND_NAVI_BUTTON[col].isDrawn = false;
-                }
-                break;
-            default:
-                break;
-            }
-        }
-    }
-    friendListUI.page = page;
-}
-
-void animateUIElement(UIButton *elements[], ui_anim_mode_id_t animation, int timeInMS)
-{
-    switch (animation)
-    {
-        // to be imnplemented
-    }
-}
-
-bool drawSketchPreview(const char *filepath, int x, int y, int scaleDown, bool drawBorder)
-{
-    // scale = 2 means 480x480 → 240x240
-    // scale = 3 means 480x480 → 160x160
-    // scale = 4 means 480x480 → 120x120
-
-    File f = SD.open(filepath, FILE_READ);
-    if (!f)
-        return false;
-
-    const int SOURCE_WIDTH  = TFT_HOR_RES;
-    const int SOURCE_HEIGHT = TFT_VER_RES;
-    int w = SOURCE_WIDTH / scaleDown;
-    int h = SOURCE_HEIGHT / scaleDown;
-
-    tft.startWrite();
-
-    // Read file in strips to save memory
-    const int STRIP_HEIGHT = 16; // Process 16 source rows at a time
-    uint8_t *stripBuffer = (uint8_t *)malloc((SOURCE_WIDTH * STRIP_HEIGHT) / 2);
-    if (!stripBuffer)
-    {
-        f.close();
-        return false;
-    }
-
-    for (int stripY = 0; stripY < SOURCE_HEIGHT; stripY += STRIP_HEIGHT)
-    {
-        // Read strip from file
-        size_t bytesToRead = (SOURCE_WIDTH * STRIP_HEIGHT) / 2;
-        f.read(stripBuffer, bytesToRead);
-
-        // Process this strip
-        for (int localY = 0; localY < STRIP_HEIGHT; localY += scaleDown)
-        {
-            int srcY = stripY + localY;
-            int destY = srcY / scaleDown;
-
-            if (destY >= h)
-                break;
-
-            for (int srcX = 0; srcX < SOURCE_WIDTH; srcX += scaleDown)
-            {
-                int destX = srcX / scaleDown;
-
-                // Just sample top-left pixel of each block (no averaging)
-                int pixelIndex = localY * SOURCE_WIDTH + srcX;
-                int byteIndex = pixelIndex >> 1;
-                uint8_t byte = stripBuffer[byteIndex];
-
-                uint8_t colorIndex;
-                if (pixelIndex & 1)
-                {
-                    colorIndex = byte & 0x0F;
-                }
-                else
-                {
-                    colorIndex = (byte >> 4) & 0x0F;
-                }
-
-                tft.drawPixel(x + destX, y + destY, draw_color_palette[colorIndex]);
-            }
-        }
-    }
-
-    tft.endWrite();
-    free(stripBuffer);
-    f.close();
-
-    if (drawBorder)
-    {
-        tft.drawRect(x - 1, y - 1, w + 2, h + 2, TFT_WHITE);
-    }
-
-    return true;
-}
-
-bool checkIfUIIsInitialized(screen_id_t targetScreen)
-{
-    for (int i = 0; i < uiButtons.size(); i++)
-    {
-        if (uiButtons[i]->screenContext == targetScreen)
-        {
-            return true;
-        }
-    }
-    return false;
+    s_initialized[targetScreen] = true;
 }
 
 void cleanupUIOutOfContext(bool removeFromContext)
@@ -710,22 +159,68 @@ void cleanupUIOutOfContext(bool removeFromContext)
         if (currentScreen != uiButtons[i]->screenContext ||
             (uiButtons[i]->subcontext != 0 && uiButtons[i]->subcontext != activeSub))
         {
-            // Overwrite drawn elements with canvas.
             if (uiButtons[i]->isDrawn)
-            {
-                // Serial.print(" - DRAWING OVER");
-                //drawFramebuffer(uiButtons[i]->x, uiButtons[i]->y, uiButtons[i]->w, uiButtons[i]->h);
                 uiButtons[i]->isDrawn = false;
-            }
 
-            // Remove from vector if specified, we're counting backwards to avoid issues with shifting indices.
             if (removeFromContext)
             {
-                // Serial.print(" AND REMOVING");
+                s_initialized[uiButtons[i]->screenContext] = false;
                 uiButtons[i]->isDrawn = false;
                 uiButtons.erase(uiButtons.begin() + i);
             }
         }
-        // Serial.println("");
+    }
+}
+
+bool drawSketchPreview(const char *filepath, int x, int y, int scaleDown, bool drawBorder)
+{
+    File f = SD.open(filepath, FILE_READ);
+    if (!f) return false;
+
+    FboxHeader hdr;
+    if (!fboxReadHeader(f, hdr)) { f.close(); return false; }
+
+    int w = hdr.width  / scaleDown;
+    int h = hdr.height / scaleDown;
+
+    // v3: skip frame size table, read frame type byte, then RLE-decode frame 0
+    uint8_t frame_type;
+    if (hdr.frame_count > 0 &&
+        f.seek(FBOX_HEADER_SIZE + (uint32_t)hdr.frame_count * 4) &&
+        f.read(&frame_type, 1) == 1 && frame_type == FBOX_FRAME_I) {
+        FboxRleReader rle;
+        rle.begin(&f, hdr.width * hdr.height);
+        bool more = true;
+        uint16_t rowBuf[TFT_HOR_RES];
+        int dstY = 0;
+        for (int srcY = 0; srcY < hdr.height && more; srcY++) {
+            for (int srcX = 0; srcX < hdr.width; srcX++) {
+                int idx = rle.next();
+                if (idx < 0) { more = false; break; }
+                rowBuf[srcX] = draw_color_palette[idx];
+            }
+            if (more && srcY % scaleDown == 0) {
+                tft.startWrite();
+                for (int srcX = 0; srcX < hdr.width; srcX += scaleDown)
+                    tft.drawPixel(x + srcX / scaleDown, y + dstY, rowBuf[srcX]);
+                tft.endWrite();
+                dstY++;
+            }
+        }
+    }
+
+    f.close();
+
+    if (drawBorder)
+        tft.drawRect(x - 1, y - 1, w + 2, h + 2, TFT_WHITE);
+
+    return true;
+}
+
+void animateUIElement(UIButton *elements[], ui_anim_mode_id_t animation, int timeInMS)
+{
+    switch (animation)
+    {
+        // to be implemented
     }
 }

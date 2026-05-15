@@ -4,31 +4,25 @@ Known structural problems that should be resolved before significant feature wor
 
 ---
 
-## [MEDIUM] ui_core.cpp screen extraction (in progress)
+## ~~[MEDIUM] ui_core.cpp screen extraction~~ — DONE
 
-**Files:** [src/ui/ui_core.cpp](../../src/ui/ui_core.cpp), [src/ui/ui_screen_canvas_menu.cpp](../../src/ui/ui_screen_canvas_menu.cpp)
-
-**Status:** The dispatcher and registry are in place — `ScreenHandlers` table in `ui_core.cpp`, indexed by `screen_id_t`, with `init` / `onEnter` / `draw` / `handleTouch` hooks per screen. `SCREEN_CANVAS_MENU` is fully extracted to its own module. See [docs/ARCHITECTURE.md](../ARCHITECTURE.md) for the dispatch model.
-
-**Remaining work:**
-- Extract `SCREEN_SEND` to `src/ui/ui_screen_send.cpp/.hpp` (init, draw, handleTouch are currently file-static helpers in `ui_core.cpp`).
-- Extract `SCREEN_FILE_BROWSER` to `src/ui/ui_screen_file_browser.cpp/.hpp` (same situation).
-- Move the SEND/FILE_BROWSER button arrays out of `ui_core.cpp` once their owning modules exist.
-- Once that's done, `ui_core.cpp` should hold only the dispatcher, `UIButton` plumbing, `cleanupUIOutOfContext`, and the registry table.
-
-**Pattern to follow:** mirror `ui_screen_canvas_menu` — header declares the four hooks, `.cpp` keeps button arrays/labels `static`, and `ui_core.cpp` includes the header and references the hooks from one row in `screens[]`.
+`SCREEN_SEND` → `src/ui/ui_screen_send.cpp/.hpp` ✓  
+`SCREEN_FILE_BROWSER` → `src/ui/ui_screen_file_browser.cpp/.hpp` ✓  
+`ui_core.cpp` now holds only the dispatcher, registry, `UIButton` plumbing, `cleanupUIOutOfContext`, `drawSketchPreview`, and `drawFriendboxLoadingScreen`. No further extraction needed unless `drawSketchPreview` / `drawFriendboxLoadingScreen` grow substantially.
 
 ---
 
-## [HIGH] Network send/receive not implemented
+## [HIGH] Friend-to-friend send/receive not implemented
 
 **File:** [src/network.cpp](../../src/network.cpp)
 
-**Problem:** `networkSendFramebuffer()` and `networkReceiveFramebuffer()` are stubs. The backend API contract is undefined.
+**Problem:** `networkSendFramebuffer()` and `networkReceiveFramebuffer()` are stubs. The peer-to-peer API contract (sending a sketch to a specific friend, receiving a push notification) is undefined.
 
-**Impact:** Core feature (sending drawings to friends) is blocked.
+**Partial progress:** `networkSendCanvas()` (upload to server) is implemented. `networkDownloadFbox()` (download by sketch ID) is implemented and used by animation playback.
 
-**Desired state:** Defined API contract in a product spec; implemented and tested send/receive flow.
+**Impact:** Core feature (sending drawings to a specific friend) is still blocked.
+
+**Desired state:** Defined API contract in a product spec; implemented and tested send/receive flow with friend addressing.
 
 ---
 
