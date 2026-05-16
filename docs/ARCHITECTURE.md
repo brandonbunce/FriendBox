@@ -145,16 +145,47 @@ Other screens (`SEND`, `FILE_BROWSER`) call `useCanvasSlot()` in their `onEnter`
 
 **Hall effect sensor:** GPIO 15, 50 ms debounce, opens the canvas menu.
 
-**FBOX codec** — the canonical binary format for all sketches and animations. See [design-docs/fbox-codec.md](design-docs/fbox-codec.md) for the format spec. The public API in `io.hpp`:
+**FBOX codec** — the canonical binary format for all sketches and animations. See [design-docs/fbox-codec.md](design-docs/fbox-codec.md) for the format spec. Playback is decoupled from the byte source via the `FboxSource` interface (see `fbox_source.hpp`/`.cpp`):
+
+| Source impl | Use |
+|---|---|
+| `FboxSourceSD` | Read from a path on SD card. Sequential, no `seek()`. |
+| `FboxSourcePSRAM` | Read from an in-PSRAM buffer (entire file pre-loaded). |
+| `FboxSourceHTTP` | Stream from `HTTPClient::getStreamPtr()`, with read timeout. |
+| `FboxSourceCrc` | Wraps any source; folds every byte into a running `esp_rom_crc32_le` accumulator. The playback core composes this on top of the caller's source. |
+
+The public API in `io.hpp`:
 
 | Function | Purpose |
 |---|---|
-| `fboxReadHeader(File &f, FboxHeader &out)` | Parse 128-byte header, validate magic and version |
-| `fboxLoadFrame0(File &f, const FboxHeader &hdr)` | Decode frame 0 into a malloc'd nibble buffer; handles both v1 and v2 |
-| `loadSketchFromSD(const char *path)` | Open .fbox, decode frame 0, blit to LT7680 canvas slot |
-| `playFboxAnimation(const char *path)` | Decode and display all frames in a loop at the file's FPS; touch exits |
+| `fboxReadHeader(FboxSource &src, FboxHeader &out, uint8_t *raw_out)` | Parse 128-byte header, validate magic and version. `raw_out` captures the bytes so the caller can compute the CRC seed over [62..127]. |
+| `loadSketchFromSD(const char *path)` | Open .fbox, decode frame 0, blit to LT7680 canvas slot. |
+| `playFboxAnimation(FboxSource &src)` | Decode and display all frames at the file's FPS. Returns a `PlaybackResult` so callers can fall back across sources. |
+| `playFboxAnimationFromSD(const char *path)` | Convenience wrapper that constructs `FboxSourceSD`. |
 
-`fboxRleDecode` is a `static` helper — not in the public header. It decodes one v2 RLE frame into a nibble buffer.
+`PlaybackResult` enum: `OK`, `READ_UNDERRUN`, `DECODE_ERROR`, `CRC_MISMATCH`, `USER_CANCELLED`, `OOM`. Intended use: UI tries `FboxSourceHTTP` first; on `READ_UNDERRUN` it caches the file to SD and replays via `playFboxAnimationFromSD()`.
+
+**Animation playback pipeline** (`playFboxAnimation` in `io.cpp`):
+
+```
+                       core 0                          core 1 (app-main)
+                  ┌─────────────────┐              ┌────────────────────┐
+  FboxSource ──→  │  fbox_dec task  │  ──slot──→   │  displayAnim*      │
+  (SD/HTTP/PSRAM) │  RLE+XOR+CLUT    │              │  writeRawFrame8bpp │
+   wrapped by     │  one frame/slot │              │  waitVSync, flip   │
+   FboxSourceCrc  └─────────────────┘              └────────────────────┘
+                          ↑                                  ↓
+                          └───── sem_free  ←── 3-slot ring ──┘
+                                 sem_ready (PSRAM, 32-byte aligned)
+```
+
+Key invariants:
+- **One persistent `FboxRleReader` across all frames.** Its 256-byte chunk buffer pre-reads next-frame bytes; a per-frame reader would discard those and shift every frame's start offset, scrambling output and forcing an early EOF. Use `rle.beginFrame(pixel_count)` between frames to reset token state while preserving the buffer.
+- **Slot buffers are 32-byte aligned via `heap_caps_aligned_alloc(32, ..., MALLOC_CAP_SPIRAM)`.** Required so `esp_cache_msync(buf, n, ESP_CACHE_MSYNC_FLAG_DIR_C2M)` (called by the producer before signalling each slot ready) actually flushes the cache instead of failing the alignment check and silently no-op'ing. Without the writeback, core 1's DMA reads stale physical PSRAM.
+- **Producer task yields one tick per frame (`vTaskDelay(1)`).** It runs at priority 2 (above IDLE) and is otherwise CPU-bound; without the yield, IDLE0 never runs and the task watchdog trips after 5 s of decoding (only manifests once SPI is the bottleneck and the producer keeps up trivially).
+- **CRC32** is accumulated by `FboxSourceCrc` over header [62..127] + frame table + frame data + audio. Verified at end of playback when `hdr.crc32 != 0`.
+
+**Audio:** IMA ADPCM decode lives in `audio.cpp` / `audio.hpp`. `fboxDecodeAudio` reads the trailing audio section from the source and produces an in-PSRAM int16 PCM buffer (`FboxAudio`). Capped at `FBOX_AUDIO_PSRAM_CAP` = 1 MB (~23 s at 22050 Hz mono). No I2S output yet — speaker hardware is planned. Known handoff bug: bytes still buffered inside the producer's `FboxRleReader` at video EOF are the first bytes of the audio section, so `fboxDecodeAudio` reading the source directly skips them and the decoded PCM starts mid-block. Documented in the `playFboxAnimation` source. Fix when audio output lands: route audio reads through a shared buffered source.
 
 **File layout on SD:**
 

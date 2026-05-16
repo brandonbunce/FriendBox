@@ -12,6 +12,28 @@ Known structural problems that should be resolved before significant feature wor
 
 ---
 
+## [MEDIUM] Audio source handoff at video EOF
+
+**Files:** [src/io.cpp](../../src/io.cpp), [src/audio.cpp](../../src/audio.cpp), [include/fbox_source.hpp](../../include/fbox_source.hpp)
+
+**Problem:** The producer task's persistent `FboxRleReader` chunk-buffers up to 256 bytes of look-ahead from the source. At video EOF, those buffered bytes are the first bytes of the audio section. `fboxDecodeAudio` reads from the source directly (bypassing the reader's buf), so those bytes are skipped — decoded PCM starts mid-block with wrong predictor/step_index state.
+
+**Workaround in place:** Documented inline in `playFboxAnimation`; not currently user-visible because we have no I2S DAC hardware and audio decode is buffer-only.
+
+**Desired state:** Introduce a shared `FboxSourceBuffered` wrapper that both `FboxRleReader` and `fboxDecodeAudio` consume bytes from, so the handoff is byte-exact. Land this with audio output hardware.
+
+---
+
+## [MEDIUM] LT7680 bottom-strip artifact (cause unknown)
+
+**File:** [lib/Panel_PCBA5981/Panel_PCBA5981.cpp](../../lib/Panel_PCBA5981/Panel_PCBA5981.cpp)
+
+**Problem:** Animation frames sometimes show a stale strip at the bottom of the panel. Reproduces at 40 MHz and at 80 MHz SPI, so it isn't the FIFO-drain story the legacy comments in `writeRawFrame8bpp` and `LGFX_ESP32_PCBA5981_GT911.hpp` claim. The previously-claimed "50 MHz max" datasheet ceiling does not have evidence behind it.
+
+**Desired state:** Root-cause investigation. Candidates worth checking: MISA-vs-VSync write ordering (animation path writes MISA before `waitVSync`; flash-DMA path writes after — the second order is what the existing project memory describes as correct), SDRAM refresh setting, or a panel timing edge case.
+
+---
+
 ## [HIGH] Friend-to-friend send/receive not implemented
 
 **File:** [src/network.cpp](../../src/network.cpp)

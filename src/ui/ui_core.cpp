@@ -174,22 +174,30 @@ void cleanupUIOutOfContext(bool removeFromContext)
 
 bool drawSketchPreview(const char *filepath, int x, int y, int scaleDown, bool drawBorder)
 {
-    File f = SD.open(filepath, FILE_READ);
-    if (!f) return false;
+    FboxSourceSD src(filepath);
+    if (!src.ok()) return false;
 
     FboxHeader hdr;
-    if (!fboxReadHeader(f, hdr)) { f.close(); return false; }
+    if (!fboxReadHeader(src, hdr)) return false;
 
     int w = hdr.width  / scaleDown;
     int h = hdr.height / scaleDown;
 
-    // v3: skip frame size table, read frame type byte, then RLE-decode frame 0
+    // v3: skip frame size table sequentially, then read frame 0's type byte
+    uint32_t table_bytes = (uint32_t)hdr.frame_count * 4;
+    uint8_t  skip[256];
+    while (table_bytes > 0) {
+        size_t take = table_bytes > sizeof(skip) ? sizeof(skip) : table_bytes;
+        int r = src.read(skip, take);
+        if (r <= 0) return false;
+        table_bytes -= (uint32_t)r;
+    }
+
     uint8_t frame_type;
     if (hdr.frame_count > 0 &&
-        f.seek(FBOX_HEADER_SIZE + (uint32_t)hdr.frame_count * 4) &&
-        f.read(&frame_type, 1) == 1 && frame_type == FBOX_FRAME_I) {
+        src.read(&frame_type, 1) == 1 && frame_type == FBOX_FRAME_I) {
         FboxRleReader rle;
-        rle.begin(&f, hdr.width * hdr.height);
+        rle.begin(&src, hdr.width * hdr.height);
         bool more = true;
         uint16_t rowBuf[TFT_HOR_RES];
         int dstY = 0;
@@ -208,8 +216,6 @@ bool drawSketchPreview(const char *filepath, int x, int y, int scaleDown, bool d
             }
         }
     }
-
-    f.close();
 
     if (drawBorder)
         tft.drawRect(x - 1, y - 1, w + 2, h + 2, TFT_WHITE);

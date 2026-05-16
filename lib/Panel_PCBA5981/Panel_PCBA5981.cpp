@@ -679,7 +679,8 @@ bool Panel_PCBA5981::init(bool use_reset)
     // chip expects this bit set for normal operation), bit3 = 18-bit
     // TFT output, bit0 = 16-bit host bus.
     _write_reg(0x01, 0x89);
-    _write_reg(0x02, 0x40);   // MACR: 16bpp RGB565, L->R, T->B
+    _write_reg(0x02, 0x40);   // MACR: direct write, LR->TB read & write
+                              // (bit[6]=1 is don't-care in the 0xb direct-write encoding)
     _write_reg(0x03, 0x00);   // ICR: graphic mode, write to SDRAM
 
     {
@@ -1076,30 +1077,6 @@ void Panel_PCBA5981::writeRawFrame8bpp(const uint8_t* clut8, uint32_t count)
     auto t0 = millis();
     while ((_read_status() & 0x40) == 0) {
         if (millis() - t0 > 50) break;   // safety: ~3 frame periods
-    }
-
-    // Diagnostic: read back the last 8 bytes of the canvas slot from SDRAM
-    // and compare to what we sent. If they don't match, the SPI burst is
-    // silently dropping bytes near the end even though the cursor wrapped.
-    static uint32_t diag_n = 0;
-    if (diag_n < 4) {
-        diag_n++;
-        uint16_t y = timing.v_display - 1;       // last row
-        uint16_t w = 8;
-        uint16_t x = timing.h_display - w;       // last 8 cols of last row
-        _start_memoryread(x, y, w, 1);
-        uint8_t got[8];
-        for (int i = 0; i < 8; i++) got[i] = _read_byte();
-
-        const uint8_t* expected = clut8 + (uint32_t)y * timing.h_display + x;
-        Serial.printf("[SDRAM] frame=%lu expected=%02X %02X %02X %02X %02X %02X %02X %02X\n",
-                      (unsigned long)diag_n,
-                      expected[0], expected[1], expected[2], expected[3],
-                      expected[4], expected[5], expected[6], expected[7]);
-        Serial.printf("[SDRAM] frame=%lu  read_bk=%02X %02X %02X %02X %02X %02X %02X %02X\n",
-                      (unsigned long)diag_n,
-                      got[0], got[1], got[2], got[3],
-                      got[4], got[5], got[6], got[7]);
     }
 
     _write_reg(0x02, _reg02);  // restore rotation

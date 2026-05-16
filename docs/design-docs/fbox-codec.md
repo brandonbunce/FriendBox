@@ -113,42 +113,54 @@ Unchanged from v1/v2. A 480×480 frame is exactly 115,200 bytes uncompressed —
 ### Sketch (single frame)
 
 ```
-1. fboxReadHeader(f, hdr)   — reads and validates 128 bytes
-2. f.seek(FBOX_HEADER_SIZE + frame_count * 4)
-                            — skip frame size table
-3. f.read(&type, 1)         — must be FBOX_FRAME_I (0x49)
-4. FboxRleReader rle; rle.begin(&f, width * height)
-5. For each row y:
+1. FboxSourceSD src(path)            — sequential reader; no seek()
+2. fboxReadHeader(src, hdr)          — reads and validates 128 bytes
+3. consume frame_count × 4 bytes      — skip frame size table sequentially
+4. src.read(&type, 1)                — must be FBOX_FRAME_I (0x49)
+5. FboxRleReader rle; rle.begin(&src, width * height)
+6. For each row y:
      for each pixel x: pxLine[x] = draw_color_palette[rle.next()]
      displayWriteScanlineSpanned(y, pxLine, width)
 ```
 
 ### Animation (multi-frame loop)
 
-```
-Allocate in PSRAM:
-  frame_4bpp[pixel_count / 2]  — nibble-packed, previous/current frame
-  frame_buf[pixel_count]       — 8bpp CLUT indices for LT7680
+Playback is dual-core. The producer task on core 0 decodes frames into a 3-slot PSRAM ring; the consumer (app-main on core 1) drains slots to the LT7680. Source-agnostic via the `FboxSource` interface — works the same for SD, HTTP, or PSRAM-resident input. See [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md#iocpp--iohpp) for the full pipeline diagram.
 
-Read frame size table: frame_count × uint32 from [FBOX_HEADER_SIZE..]
-data_base = FBOX_HEADER_SIZE + frame_count * 4
+Decode logic (per slot):
 
-Loop:
-  frame_offset = data_base
-  for fi in 0..frame_count-1:
-    f.seek(frame_offset)
-    f.read(&frame_type, 1)         — FBOX_FRAME_I or FBOX_FRAME_P
-    FboxRleReader rle; rle.begin(&f, pixel_count)
-    for i in 0..pixel_count-1:
-      raw      = rle.next()        — 0–15 from RLE stream
-      prev_nib = nibble i from frame_4bpp
-      curr_nib = (P-frame) ? raw ^ prev_nib : raw
-      write curr_nib → frame_4bpp[i]
-      frame_buf[i] = clut_lut[curr_nib]
-    displayAnimWriteFrame(frame_buf)
-    frame_offset += frame_sizes[fi]  — includes the type byte
-  repeat from frame 0 (always I-frame — clean re-entry)
 ```
+Setup once:
+  CrcSource = FboxSourceCrc(user_source, crc_seed_over_header[62..127])
+  Read frame size table into PSRAM (also fed into CRC).
+  Allocate in PSRAM:
+    frame_4bpp[pixel_count / 2]  — nibble-packed previous-frame baseline
+    slot[3].frame_buf[pixel_count] — 8bpp CLUT indices, 32-byte aligned
+  rle = FboxRleReader bound to CrcSource — ONE instance for the whole stream
+
+For each frame fi in 0..frame_count-1:
+  frame_type = rle.read_byte()        — FBOX_FRAME_I or FBOX_FRAME_P
+  rle.beginFrame(pixel_count)         — resets token state, KEEPS chunk buffer
+  for i in 0..pixel_count-1:
+    raw      = rle.next()             — 0–15 from RLE stream
+    prev_nib = nibble i from frame_4bpp
+    curr_nib = (P-frame) ? raw ^ prev_nib : raw
+    write curr_nib → frame_4bpp[i]
+    slot.frame_buf[i] = clut_lut[curr_nib]
+  esp_cache_msync(slot.frame_buf, pixel_count, ESP_CACHE_MSYNC_FLAG_DIR_C2M)
+  xSemaphoreGive(sem_ready)
+  vTaskDelay(1)                       — feed WDT
+
+After last frame:
+  Verify FboxSourceCrc.crc() against header crc32 (0 = skip).
+  Decode any audio section into PSRAM PCM via fboxDecodeAudio(src, hdr, &audio).
+```
+
+**Critical invariants** — see [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md#iocpp--iohpp) for full rationale:
+
+- Use **one persistent `FboxRleReader`** across all frames. Discarding it per-frame loses up to 255 pre-read next-frame bytes and shifts every subsequent frame's start offset → scrambled output and premature EOF.
+- Allocate `frame_buf` with `heap_caps_aligned_alloc(32, ..., MALLOC_CAP_SPIRAM)`. Cache writeback is mandatory and only fires on 32-byte-aligned addresses.
+- Producer task at priority 2 with `vTaskDelay(1)` per frame so IDLE0 stays alive and the task watchdog doesn't trip when the SPI bus is the bottleneck.
 
 ---
 
@@ -156,21 +168,24 @@ Loop:
 
 | Buffer | Size | Location |
 |---|---|---|
-| `frame_sizes[]` | `frame_count × 4` bytes | heap (malloc) |
-| `frame_4bpp` | 115,200 bytes | PSRAM (ps_calloc) |
-| `frame_buf` | 230,400 bytes | PSRAM (ps_malloc) |
-| `FboxRleReader.buf` | 256 bytes | stack |
+| `frame_sizes[]` | `frame_count × 4` bytes | PSRAM (`ps_malloc`) |
+| `frame_4bpp` | 115,200 bytes | PSRAM (`ps_calloc`) |
+| `slot[i].frame_buf` × 3 | 230,400 bytes each | PSRAM, 32-byte aligned (`heap_caps_aligned_alloc`) |
+| `FboxRleReader.buf` | 256 bytes | task stack |
+| `FboxAudio.pcm` (optional) | ≤ `FBOX_AUDIO_PSRAM_CAP` = 1 MB | PSRAM (`ps_malloc`) |
 
-Total PSRAM for decode: ~346 KB. With 4 MB+ PSRAM available, headroom is comfortable.
+Total PSRAM during playback: ~960 KB for video, up to ~1.96 MB with audio. Well within 8 MB.
 
 ---
 
 ## Audio
 
-Audio is stored as IMA ADPCM blocks after the last frame. The ESP32 does not yet play audio — `audio_size`, `audio_sample_rate`, and `audio_channels` are parsed and stored in `FboxHeader` but not acted upon. Speaker support (I2S output on a second core) is the next audio milestone.
+Audio is stored as IMA ADPCM blocks after the last frame. `fboxDecodeAudio` decodes the trailing section into a PSRAM `int16` PCM buffer (`FboxAudio`). The decoder is in [`src/audio.cpp`](../../src/audio.cpp) and ports the step/index tables verbatim from `fbox.py`.
 
-When implemented, the decode recipe is:
-- Read one 512-byte block from SD
-- Decode 1016 samples per block using the IMA ADPCM step and index tables
+I2S output is not yet wired up — decoded PCM sits in PSRAM until speaker hardware lands. There is a known byte-handoff bug: bytes still inside the producer's `FboxRleReader` chunk buffer at video EOF are the first bytes of the audio section, so direct reads from the source skip them and decoded PCM starts mid-block. Tracked in [`docs/exec-plans/tech-debt-tracker.md`](../exec-plans/tech-debt-tracker.md). Will be fixed alongside the I2S work via a shared `FboxSourceBuffered`.
+
+When implementation lands:
+- Read one 512-byte block from the (buffered) source
+- Decode 1016 samples per block using `ImaAdpcmDecoder`
 - Output decoded int16 samples to I2S DMA
 - Advance to next block; repeat until `audio_size` bytes consumed

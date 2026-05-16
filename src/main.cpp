@@ -9,7 +9,7 @@
 
 // (C) 2025-2026 Brandon Bunce - FriendBox System Software
 #define FRIENDBOX_DEBUG_MODE true
-#define FRIENDBOX_SOFTWARE_VERSION "Software v0.3"
+#define FRIENDBOX_SOFTWARE_VERSION "Software v0.4"
 
 // Functions
 bool initNVS();
@@ -84,7 +84,7 @@ static void playSketchFromServer(const char *sketch_id)
         }
     }
     drawFriendboxLoadingScreen("Playing Sketch", 250, sketch_id, "ENJOY :)");
-    playFboxAnimation(path);
+    playFboxAnimationFromSD(path);
 }
 
 void setup()
@@ -101,7 +101,9 @@ void setup()
   //displayFlashReadJEDECID();
   //playSketchFromServer("1778816259113"); // TP3
   //playSketchFromServer("1778537329511"); // TP1
-  playSketchFromServer("1778875275865");
+  playSketchFromServer("1778392265348");
+  playSketchFromServer("1776835153465");
+  playFboxAnimationFromSD("/sketches/received/1778392265348.fbox");
 }
  
 void loop()

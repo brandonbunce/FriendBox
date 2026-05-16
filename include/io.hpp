@@ -5,6 +5,7 @@
 #include <SPI.h>
 #include <SD.h>
 #include <Preferences.h>
+#include "fbox_source.hpp"
 
 #define SD_CS 14
 #define SD_SCK 12
@@ -41,6 +42,17 @@ struct FboxHeader {
     uint32_t crc32;              // CRC32 over file bytes [62..EOF]; 0=skip
 };
 
+/* Result of a playback attempt. Callers use this to decide whether to retry,
+ * fall back to a different source, or surface an error in the UI. */
+enum class PlaybackResult {
+    OK,                // played to EOF, no errors
+    READ_UNDERRUN,     // source returned -1 mid-stream (network died, SD ejected)
+    DECODE_ERROR,      // bad header, bad RLE, dimensions mismatch
+    CRC_MISMATCH,      // file CRC32 didn't match header value
+    USER_CANCELLED,    // touch input aborted playback
+    OOM                // ps_malloc failed
+};
+
 // Functions
 bool initSD(bool forceFormat = false);
 bool initNVS();
@@ -56,15 +68,17 @@ void saveImageToSD(int slot);
 void loadImageFromSD(int slot);
 std::vector<std::string> sdGetFboxFiles();
 
-/** Parse the 128-byte FBOX header from an open file positioned at byte 0.
- *  Returns false if the magic is wrong or version unsupported. */
-bool fboxReadHeader(File &f, FboxHeader &out);
+/** Parse the 128-byte FBOX header from a source positioned at byte 0.
+ *  Returns false if the magic is wrong or version unsupported.
+ *  If raw_out != nullptr, the raw 128 header bytes are copied there so the
+ *  caller can compute the partial CRC over bytes [62..127]. */
+bool fboxReadHeader(FboxSource &src, FboxHeader &out, uint8_t *raw_out = nullptr);
 
 /** Streaming RLE decoder for FBOX v3 frame payloads (I-frames and P-frames).
  *  Returns raw 4-bit nibbles; the caller applies XOR delta for P-frames.
- *  Internal 256-byte chunk buffer reduces SD SPI calls ~100× versus 1-byte reads. */
+ *  Internal 256-byte chunk buffer reduces source-side calls ~100× versus 1-byte reads. */
 struct FboxRleReader {
-    File    *f;
+    FboxSource *src;
     int      pixels_left;
     bool     in_run;
     uint8_t  run_color;
@@ -72,23 +86,37 @@ struct FboxRleReader {
     uint8_t  lit_byte;
     bool     lit_hi_valid;
 
-    // Chunk buffer: fills from SD 256 bytes at a time
+    // Chunk buffer: fills from source 256 bytes at a time
     uint8_t buf[256];
     int     buf_pos;
     int     buf_fill;
+    bool    err;
 
-    void begin(File *f_, int pixel_count) {
-        f = f_; pixels_left = pixel_count;
+    void begin(FboxSource *s, int pixel_count) {
+        src = s; pixels_left = pixel_count;
         in_run = false; token_count = 0; lit_hi_valid = false;
-        buf_pos = 0; buf_fill = 0;
+        buf_pos = 0; buf_fill = 0; err = false;
     }
 
-    // Returns next raw byte from the file, or -1 on EOF/error.
+    /* Reset per-frame decode state for streaming playback. Keeps the chunk
+     * buffer intact so any bytes the previous frame's decode pre-read (up to
+     * 256) are consumed first — without this, the over-read bytes would be
+     * lost when the reader is discarded between frames, shifting every
+     * subsequent frame's start offset and producing visual chaos. The encoder
+     * emits one fresh RLE token stream per frame, so token state resets cleanly. */
+    void beginFrame(int pixel_count) {
+        pixels_left = pixel_count;
+        in_run = false; token_count = 0; lit_hi_valid = false;
+        err = false;
+    }
+
+    // Returns next raw byte from the source, or -1 on EOF/error.
     int read_byte() {
         if (buf_pos >= buf_fill) {
-            buf_fill = (int)f->readBytes((char *)buf, sizeof(buf));
+            int r = src->read(buf, sizeof(buf));
+            if (r <= 0) { err = (r < 0); buf_fill = 0; return -1; }
+            buf_fill = r;
             buf_pos  = 0;
-            if (buf_fill <= 0) return -1;
         }
         return buf[buf_pos++];
     }
@@ -125,8 +153,12 @@ struct FboxRleReader {
 /** Open an FBOX file from SD, decode frame 0, and blit it into the LT7680 canvas slot. */
 void loadSketchFromSD(const char *path);
 
-/** Play all frames of an FBOX animation from SD in a loop.
- *  Stops when the screen is touched. For single-frame files, behaves like loadSketchFromSD. */
-void playFboxAnimation(const char *path);
+/** Play all frames of an FBOX animation from the given source.
+ *  Stops when the screen is touched. For single-frame files, behaves like
+ *  loadSketchFromSD. */
+PlaybackResult playFboxAnimation(FboxSource &src);
+
+/** Convenience wrapper: open path on SD and play. */
+PlaybackResult playFboxAnimationFromSD(const char *path);
 
 #endif

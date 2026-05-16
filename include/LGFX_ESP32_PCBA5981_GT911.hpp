@@ -32,7 +32,7 @@ public:
       // Above that, the chip's Memory Write FIFO can't drain fast enough
       // during the per-frame burst and the last bytes get dropped — visible
       // as a stale strip at the bottom of every animation frame.
-      cfg.freq_write  = 40000000;
+      cfg.freq_write  = 80000000;
       cfg.freq_read   = 20000000;
       cfg.spi_3wire   = false;
       cfg.use_lock    = true;
