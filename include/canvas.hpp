@@ -2,8 +2,7 @@
 #define CANVAS_HPP
 
 #include <Arduino.h>
-#include <SPI.h>
-#include <SD.h>
+#include <SD_MMC.h>
 #include <Preferences.h>
 
 /** Defines color palette for our 4-bit color frame buffer.

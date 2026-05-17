@@ -1,7 +1,7 @@
 #include "network.hpp"
 #include "display.hpp"
 #include "canvas.hpp"
-#include <SD.h>
+#include <SD_MMC.h>
 
 // Network
 HTTPClient http;
@@ -198,7 +198,7 @@ bool networkDownloadFbox(const char *sketch_id, const char *dest_path)
     int contentLen = http.getSize(); // -1 if chunked/unknown
     Serial.printf("networkDownloadFbox: %d bytes expected\n", contentLen);
 
-    File f = SD.open(dest_path, FILE_WRITE);
+    File f = SD_MMC.open(dest_path, FILE_WRITE);
     if (!f) {
         Serial.printf("networkDownloadFbox: cannot create %s\n", dest_path);
         http.end();
@@ -237,7 +237,7 @@ bool networkDownloadFbox(const char *sketch_id, const char *dest_path)
                   complete ? "OK" : "INCOMPLETE", total, contentLen, dest_path);
 
     if (!complete) {
-        SD.remove(dest_path);
+        SD_MMC.remove(dest_path);
         Serial.println("networkDownloadFbox: partial file deleted");
         return false;
     }

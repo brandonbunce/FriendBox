@@ -125,28 +125,29 @@ Unchanged from v1/v2. A 480×480 frame is exactly 115,200 bytes uncompressed —
 
 ### Animation (multi-frame loop)
 
-Playback is dual-core. The producer task on core 0 decodes frames into a 3-slot PSRAM ring; the consumer (app-main on core 1) drains slots to the LT7680. Source-agnostic via the `FboxSource` interface — works the same for SD, HTTP, or PSRAM-resident input. See [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md#iocpp--iohpp) for the full pipeline diagram.
+Playback is dual-core. The producer task on core 0 decodes frames into a 3-slot PSRAM ring; the consumer (app-main on core 1) drains slots to the LT7680. Source-agnostic via the `FboxSource` interface — works the same for SD, HTTP, or PSRAM-resident input. See [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md#iocpp--iohpp) for the full pipeline diagram, token-decoder details, and profiling output.
 
 Decode logic (per slot):
 
 ```
 Setup once:
   CrcSource = FboxSourceCrc(user_source, crc_seed_over_header[62..127])
-  Read frame size table into PSRAM (also fed into CRC).
-  Allocate in PSRAM:
-    frame_4bpp[pixel_count / 2]  — nibble-packed previous-frame baseline
-    slot[3].frame_buf[pixel_count] — 8bpp CLUT indices, 32-byte aligned
-  rle = FboxRleReader bound to CrcSource — ONE instance for the whole stream
+  Read frame size table (also fed into CRC).
+  Allocate:
+    frame_4bpp[pixel_count / 2]    — INTERNAL SRAM (heap_caps_calloc, MALLOC_CAP_INTERNAL)
+    slot[3].frame_buf[pixel_count] — PSRAM, 32-byte aligned (heap_caps_aligned_alloc)
+  Build clut_lut[16] and clut_pair[256] (source-byte → 16-bit fb-pair lookup).
+  rle = FboxRleReader bound to CrcSource — ONE instance for the whole stream (4 KB chunk buffer).
 
 For each frame fi in 0..frame_count-1:
   frame_type = rle.read_byte()        — FBOX_FRAME_I or FBOX_FRAME_P
   rle.beginFrame(pixel_count)         — resets token state, KEEPS chunk buffer
-  for i in 0..pixel_count-1:
-    raw      = rle.next()             — 0–15 from RLE stream
-    prev_nib = nibble i from frame_4bpp
-    curr_nib = (P-frame) ? raw ^ prev_nib : raw
-    write curr_nib → frame_4bpp[i]
-    slot.frame_buf[i] = clut_lut[curr_nib]
+  decodeFrameTokens(rle, is_pf, fb, f4, clut_lut, clut_pair, pixel_count)
+    — token-driven dispatch:
+      • I-frame RUN  → memset on fb and f4
+      • P-frame RUN  (raw=0)   → rebuild fb from f4 via clut_pair; f4 untouched
+      • P-frame RUN  (raw!=0)  → XOR pair_xor into f4 byte; fb via clut_pair
+      • LITERAL                 → pull bytes from rle.buf, 1 source byte → 1 f4 byte + 1 uint16 fb store
   esp_cache_msync(slot.frame_buf, pixel_count, ESP_CACHE_MSYNC_FLAG_DIR_C2M)
   xSemaphoreGive(sem_ready)
   vTaskDelay(1)                       — feed WDT
@@ -158,9 +159,11 @@ After last frame:
 
 **Critical invariants** — see [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md#iocpp--iohpp) for full rationale:
 
-- Use **one persistent `FboxRleReader`** across all frames. Discarding it per-frame loses up to 255 pre-read next-frame bytes and shifts every subsequent frame's start offset → scrambled output and premature EOF.
+- Use **one persistent `FboxRleReader`** across all frames. Discarding it per-frame loses up to ~4 KB of pre-read next-frame bytes and shifts every subsequent frame's start offset → scrambled output and premature EOF.
 - Allocate `frame_buf` with `heap_caps_aligned_alloc(32, ..., MALLOC_CAP_SPIRAM)`. Cache writeback is mandatory and only fires on 32-byte-aligned addresses.
+- Allocate `frame_4bpp` in **internal SRAM**, not PSRAM. Hot read/write per pixel; PSRAM access here cuts decode throughput in half.
 - Producer task at priority 2 with `vTaskDelay(1)` per frame so IDLE0 stays alive and the task watchdog doesn't trip when the SPI bus is the bottleneck.
+- Call `SD.begin(SD_CS, sdspi, 40000000)` — the **third arg is the bus frequency** and defaults to 4 MHz if omitted. Animation throughput on literal-heavy content is SD-I/O-bound, so the right clock matters here.
 
 ---
 
@@ -169,12 +172,36 @@ After last frame:
 | Buffer | Size | Location |
 |---|---|---|
 | `frame_sizes[]` | `frame_count × 4` bytes | PSRAM (`ps_malloc`) |
-| `frame_4bpp` | 115,200 bytes | PSRAM (`ps_calloc`) |
+| `frame_4bpp` | 115,200 bytes | **internal SRAM** (`heap_caps_calloc(..., MALLOC_CAP_INTERNAL)`) |
 | `slot[i].frame_buf` × 3 | 230,400 bytes each | PSRAM, 32-byte aligned (`heap_caps_aligned_alloc`) |
-| `FboxRleReader.buf` | 256 bytes | task stack |
+| `FboxRleReader.buf` | 4096 bytes | task stack (producer stack sized 16 KB) |
+| `clut_lut[16]` + `clut_pair[256]` | 16 + 512 bytes | task stack |
 | `FboxAudio.pcm` (optional) | ≤ `FBOX_AUDIO_PSRAM_CAP` = 1 MB | PSRAM (`ps_malloc`) |
 
-Total PSRAM during playback: ~960 KB for video, up to ~1.96 MB with audio. Well within 8 MB.
+PSRAM during playback: ~690 KB for the slot ring, up to ~1.7 MB with audio. Internal SRAM: ~115 KB on top of the firmware's static use (~56 KB) and runtime heap. Well within 8 MB PSRAM and 327 KB internal SRAM.
+
+---
+
+## Performance ceiling and content complexity
+
+Realistic 24 fps playback depends on the source bandwidth keeping up with the encoded bitrate. Today's reality (FriendBox PCBA5981, ESP32-S3 + SD over SPI at 40 MHz):
+
+| Content shape | Source bytes/frame | Source MB/s @ 24 fps | Fits SD ceiling (~1.3 MB/s)? | Playback |
+|---|---:|---:|---|---|
+| White background + sparse motion | ~1–5 KB | ~0.1 MB/s | yes, plenty of headroom | 24 fps, SPI-bound |
+| Mixed content / typical sketches | ~10–40 KB | ~0.5 MB/s | yes | 24 fps, SPI-bound |
+| Heavy motion, partial dither | ~40–80 KB | ~1.4 MB/s | borderline | 18–24 fps, ring stalls likely |
+| Fully dithered, no compression headroom | ~115 KB | ~2.8 MB/s | **no, ~2× over SD ceiling** | ~9 fps with `FboxSourceRingBuffered` |
+
+The SD bandwidth wall is the binding constraint above the "borderline" row. It will be addressed by migrating to SD_MMC 4-bit mode (planned, see [exec-plans/tech-debt-tracker.md](../exec-plans/tech-debt-tracker.md)).
+
+**Until that lands, content recommendations:**
+
+1. Keep dithered animations small enough to comfortably preload to PSRAM (~6 MB cap with current playback PSRAM use). The existing `FboxSourcePSRAM` source already handles this if the caller does the `ps_malloc` + bulk-load.
+2. Server-side: limit dither density on long animations; prefer 240×240 sticker format for very complex content.
+3. UI should treat `header.fps` as a *ceiling*, not a guarantee, and surface "complex content, best-effort rate" for animations whose source size exceeds the SD ceiling for their stated fps.
+
+`FboxSourceRingBuffered` (see [ARCHITECTURE.md](../ARCHITECTURE.md#iocpp--iohpp)) is the recommended SD playback path for everything but trivial sketches — it pipelines SD reads with decode and SPI, so it's strictly faster than direct SD whenever there's PSRAM headroom for the ring (default 2 MB).
 
 ---
 

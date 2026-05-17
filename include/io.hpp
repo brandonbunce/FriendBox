@@ -2,15 +2,21 @@
 #define IO_H
 
 #include <Arduino.h>
-#include <SPI.h>
-#include <SD.h>
+#include <SD_MMC.h>
 #include <Preferences.h>
+#include <esp_timer.h>
 #include "fbox_source.hpp"
 
-#define SD_CS 14
-#define SD_SCK 12
-#define SD_MISO 47
-#define SD_MOSI 48
+// SDIO 4-bit pinout (replaces the previous SPI-mode wiring).
+// Effective bandwidth ~10 MB/s vs ~1.3 MB/s on SPI — see
+// docs/exec-plans/tech-debt-tracker.md and project-sd-spi-bandwidth-wall.
+#define SD_DAT0 48
+#define SD_DAT1 47
+#define SD_DAT2 1
+#define SD_DAT3 14
+#define SD_CLK 13
+#define SD_CMD 2
+
 extern Preferences nvs;
 
 // Input (Buttons)
@@ -86,16 +92,26 @@ struct FboxRleReader {
     uint8_t  lit_byte;
     bool     lit_hi_valid;
 
-    // Chunk buffer: fills from source 256 bytes at a time
-    uint8_t buf[256];
+    // Chunk buffer: fills from source N bytes at a time. Sized large enough
+    // (4 KB) that even literal-heavy frames (≈115 KB source/frame for full
+    // dithered content) refill < 30× per frame instead of ≈450×. Each
+    // File::readBytes call carries FATFS + VFS mutex overhead, so refill
+    // count dominates SD-source decode time for literal-heavy content.
+    uint8_t buf[4096];
     int     buf_pos;
     int     buf_fill;
     bool    err;
+
+    // Refill profiling: cumulative time and count of src->read calls.
+    // Updated by read_byte and any external bulk-refill path.
+    uint64_t refill_t_us;
+    uint32_t refill_n;
 
     void begin(FboxSource *s, int pixel_count) {
         src = s; pixels_left = pixel_count;
         in_run = false; token_count = 0; lit_hi_valid = false;
         buf_pos = 0; buf_fill = 0; err = false;
+        refill_t_us = 0; refill_n = 0;
     }
 
     /* Reset per-frame decode state for streaming playback. Keeps the chunk
@@ -113,7 +129,10 @@ struct FboxRleReader {
     // Returns next raw byte from the source, or -1 on EOF/error.
     int read_byte() {
         if (buf_pos >= buf_fill) {
+            uint64_t t = esp_timer_get_time();
             int r = src->read(buf, sizeof(buf));
+            refill_t_us += esp_timer_get_time() - t;
+            refill_n++;
             if (r <= 0) { err = (r < 0); buf_fill = 0; return -1; }
             buf_fill = r;
             buf_pos  = 0;
@@ -160,5 +179,14 @@ PlaybackResult playFboxAnimation(FboxSource &src);
 
 /** Convenience wrapper: open path on SD and play. */
 PlaybackResult playFboxAnimationFromSD(const char *path);
+
+/** Convenience wrapper: open path on SD, wrap with a PSRAM ring buffer, and
+ *  play. A background loader task pulls from SD into the ring while the
+ *  decoder/consumer drain it. If the ring drains because content demand
+ *  exceeds SD throughput, playback pauses momentarily until the ring refills.
+ *  ring_bytes defaults to 2 MB. Use this for SD playback whenever PSRAM
+ *  headroom allows. */
+PlaybackResult playFboxAnimationFromSDBuffered(const char *path,
+                                               uint32_t ring_bytes = 2u * 1024u * 1024u);
 
 #endif

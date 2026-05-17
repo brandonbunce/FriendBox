@@ -74,8 +74,8 @@ static void playSketchFromServer(const char *sketch_id)
 {
     char path[64];
     snprintf(path, sizeof(path), "/sketches/received/%s.fbox", sketch_id);
-    SD.mkdir("/sketches/received");
-    if (!SD.exists(path)) {
+    SD_MMC.mkdir("/sketches/received");
+    if (!SD_MMC.exists(path)) {
         drawFriendboxLoadingScreen("Downloading sketch", 0, sketch_id, "Touch to skip not available");
         bool ok = networkDownloadFbox(sketch_id, path);
         if (!ok) {
@@ -98,12 +98,11 @@ void setup()
 #endif
   initMenuButton();
   initFriendbox();
-  //displayFlashReadJEDECID();
-  //playSketchFromServer("1778816259113"); // TP3
-  //playSketchFromServer("1778537329511"); // TP1
-  playSketchFromServer("1778392265348");
-  playSketchFromServer("1776835153465");
-  playFboxAnimationFromSD("/sketches/received/1778392265348.fbox");
+  playSketchFromServer("1778969174678"); // Kitty Dithered 24fps
+  playFboxAnimationFromSDBuffered("/sketches/received/1778969174678.fbox"); // Kitty Dithered 24fps
+  playSketchFromServer("1776835153465"); // Ben Troll Physics 24fps
+  playSketchFromServer("1776836243916"); // Troll Physics 4 16fps
+  //playFboxAnimationFromSD("/sketches/received/1778392265348.fbox");
 }
  
 void loop()

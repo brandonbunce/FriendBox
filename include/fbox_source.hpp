@@ -2,9 +2,12 @@
 #define FBOX_SOURCE_HPP
 
 #include <Arduino.h>
-#include <SD.h>
+#include <SD_MMC.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/stream_buffer.h>
 
 /* Abstract sequential byte source for FBOX playback. Implementations wrap
  * SD files, PSRAM-resident buffers, or HTTP streams. The playback core only
@@ -83,6 +86,51 @@ public:
 private:
     FboxSource *_inner;
     uint32_t    _crc;
+};
+
+/* Async PSRAM ring buffer wrapper. A FreeRTOS loader task on core 1 pulls
+ * from `inner` and writes into a PSRAM-backed stream buffer; reads on the
+ * playback path block on `xStreamBufferReceive` so the producer never touches
+ * SD/HTTP directly. The loader runs in parallel with both the decoder (core 0)
+ * and the consumer's SPI burst (core 1), so for content where the inner source
+ * can keep up with the decoder's demand, playback runs at PSRAM speed with
+ * zero stalls. When the ring drains (decoder demand exceeds inner throughput)
+ * read() blocks momentarily — playback pauses until the ring refills.
+ *
+ * Profiling: stallCount() and stallTimeUs() report receive-side waits > 1 ms,
+ * which indicate the ring drained at least once. */
+class FboxSourceRingBuffered : public FboxSource
+{
+public:
+    /* ring_bytes: usable capacity of the PSRAM ring (allocator adds +1 internally).
+     * Recommended: 1–4 MB. Smaller buffers stall more on jittery sources.
+     * Defaults to 2 MB which absorbs ≈ 17 dithered 480×480 frames. */
+    explicit FboxSourceRingBuffered(FboxSource *inner, uint32_t ring_bytes = 2u * 1024u * 1024u);
+    ~FboxSourceRingBuffered() override;
+
+    int      read(uint8_t *dst, size_t n) override;
+    bool     reset() override;
+    uint32_t size() const override { return _inner ? _inner->size() : 0; }
+
+    bool     ok() const { return _stream != nullptr; }
+    uint32_t stallCount() const { return _stall_count; }
+    uint64_t stallTimeUs() const { return _stall_time_us; }
+
+private:
+    static void  loaderTrampoline(void *arg);
+    void         loaderLoop();
+
+    FboxSource          *_inner;
+    uint8_t             *_storage;       // PSRAM, ring_bytes + 1
+    StreamBufferHandle_t _stream;
+    StaticStreamBuffer_t _stream_static; // FreeRTOS control block (internal RAM)
+    TaskHandle_t         _loader_task;
+    volatile bool        _stop;
+    volatile bool        _eof;
+    volatile bool        _loader_done;   // set by loader just before vTaskDelete
+    uint32_t             _ring_bytes;
+    uint32_t             _stall_count;
+    uint64_t             _stall_time_us;
 };
 
 class FboxSourceHTTP : public FboxSource

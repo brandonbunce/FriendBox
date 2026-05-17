@@ -11,9 +11,9 @@
 #include <esp_rom_crc.h>
 #include <esp_heap_caps.h>
 #include <esp_cache.h>
+#include <esp_timer.h>
 
 Preferences nvs;
-SPIClass sdspi = SPIClass(HSPI);
 
 
 bool initNVS()
@@ -26,17 +26,36 @@ bool initNVS()
 bool initSD(bool forceFormat)
 {
 #ifdef FRIENDBOX_DEBUG_MODE
-    Serial.println("INFO: Initializing SD...");
+    Serial.println("INFO: Initializing SD (SDIO 4-bit)...");
 #endif
-    sdspi.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-    sdspi.setFrequency(40000000); // 40 MHz — explicit to avoid inheriting display bus speed
-    if (!SD.begin(SD_CS, sdspi))
-    {
+    // SDIO 4-bit mode at 40 MHz. ~10 MB/s effective vs ~1.3 MB/s on the
+    // previous SD-over-SPI path. setPins must be called before begin.
+    if (!SD_MMC.setPins(SD_CLK, SD_CMD, SD_DAT0, SD_DAT1, SD_DAT2, SD_DAT3)) {
 #ifdef FRIENDBOX_DEBUG_MODE
-        Serial.println("ERROR: SD mount failed! Is it connected properly?");
+        Serial.println("ERROR: SD_MMC.setPins failed");
 #endif
         return false;
     }
+    // mode1bit=false → 4-bit. format_if_mount_failed=false. Frequency
+    // SDMMC_FREQ_HIGHSPEED = 40 MHz. mountpoint "/sd" matches the historical
+    // path layout (e.g. "/sketches/received/...").
+    if (!SD_MMC.begin("/sd", /*mode1bit=*/false, /*format_if_mount_failed=*/false,
+                      SDMMC_FREQ_HIGHSPEED, /*maxOpenFiles=*/5)) {
+#ifdef FRIENDBOX_DEBUG_MODE
+        Serial.println("ERROR: SD_MMC.begin failed");
+#endif
+        return false;
+    }
+#ifdef FRIENDBOX_DEBUG_MODE
+    sdcard_type_t ct = SD_MMC.cardType();
+    const char *type_s = (ct == CARD_NONE)  ? "NONE"
+                       : (ct == CARD_MMC)   ? "MMC"
+                       : (ct == CARD_SD)    ? "SDSC"
+                       : (ct == CARD_SDHC)  ? "SDHC"
+                                            : "UNKNOWN";
+    Serial.printf("INFO: SD_MMC ready — type=%s size=%lluMB freq=%dkHz\n",
+                  type_s, SD_MMC.cardSize() / (1024 * 1024), SDMMC_FREQ_HIGHSPEED);
+#endif
     return true;
 }
 
@@ -194,17 +213,201 @@ struct Slot {
     uint16_t  frame_idx;
 };
 
+// Token-driven frame decoder. Replaces the per-pixel loop with per-RLE-token
+// dispatch so RUN tokens hit memset/bulk fast paths instead of paying the
+// rle.next() + nibble shuffle + writeback cost 230,400 times per frame. On
+// motion-sparse content (large unchanged backgrounds compress to RUN tokens
+// with raw=0) this cuts decode from ~100 ms to ~20–30 ms.
+//
+// clut_pair[byte] = clut_lut[hi_nib] | (clut_lut[lo_nib] << 8). One 16-bit
+// store per source byte lands two CLUT-mapped pixels in fb at once — halves
+// the PSRAM write count vs two 8-bit stores. Little-endian layout means low
+// byte = fb[i], high byte = fb[i+1].
+//
+// Returns true on success, false on read/decode error (sets *err_under to
+// true if the underlying source returned -1, false on malformed RLE).
+static bool decodeFrameTokens(FboxRleReader &rle, bool is_pf,
+                              uint8_t *fb, uint8_t *f4,
+                              const uint8_t *clut_lut,
+                              const uint16_t *clut_pair,
+                              uint32_t pixel_count, bool *err_under)
+{
+    uint32_t i = 0;
+    *err_under = false;
+    while (i < pixel_count) {
+        int h = rle.read_byte();
+        if (h < 0) { *err_under = rle.err; return false; }
+        uint32_t count = (uint32_t)(h & 0x7F) + 1u;
+        if (i + count > pixel_count) return false;  // malformed: token overflows frame
+
+        if (h & 0x80) {
+            // ─── RUN ───────────────────────────────────────────────────────
+            int rb = rle.read_byte();
+            if (rb < 0) { *err_under = rle.err; return false; }
+            uint8_t raw = (uint8_t)rb & 0x0F;
+
+            if (!is_pf) {
+                // I-frame run: memset both buffers.
+                uint8_t clut_byte = clut_lut[raw];
+                memset(fb + i, clut_byte, count);
+
+                // f4 holds 2 nibbles/byte; handle leading odd-pixel + bulk + trailing odd.
+                uint32_t s = i, n = count;
+                if (s & 1) {
+                    f4[s >> 1] = (f4[s >> 1] & 0xF0) | raw;
+                    s++; n--;
+                }
+                if (n >> 1) memset(f4 + (s >> 1), (uint8_t)((raw << 4) | raw), n >> 1);
+                if (n & 1)  f4[(s + (n & ~1u)) >> 1] = (uint8_t)((raw << 4) | (f4[(s + (n & ~1u)) >> 1] & 0x0F));
+                i += count;
+            } else if (raw == 0) {
+                // P-frame "no change" run: f4 stays; rebuild fb from existing f4 nibbles.
+                // One 16-bit store per f4 byte via clut_pair.
+                uint32_t end = i + count;
+                if (i & 1) {
+                    fb[i] = clut_lut[f4[i >> 1] & 0x0F];
+                    i++;
+                }
+                while (i + 1 < end) {
+                    *(uint16_t *)(fb + i) = clut_pair[f4[i >> 1]];
+                    i += 2;
+                }
+                if (i < end) {
+                    fb[i] = clut_lut[(f4[i >> 1] >> 4) & 0x0F];
+                    i++;
+                }
+            } else {
+                // P-frame run with non-zero delta: XOR raw into each f4 nibble.
+                uint8_t pair_xor = (uint8_t)((raw << 4) | raw);
+                uint32_t end = i + count;
+                if (i & 1) {
+                    uint8_t b  = f4[i >> 1];
+                    uint8_t nb = (b & 0x0F) ^ raw;
+                    f4[i >> 1] = (b & 0xF0) | nb;
+                    fb[i] = clut_lut[nb];
+                    i++;
+                }
+                while (i + 1 < end) {
+                    uint8_t b  = f4[i >> 1] ^ pair_xor;
+                    f4[i >> 1] = b;
+                    *(uint16_t *)(fb + i) = clut_pair[b];
+                    i += 2;
+                }
+                if (i < end) {
+                    uint8_t b  = f4[i >> 1];
+                    uint8_t nb = ((b >> 4) & 0x0F) ^ raw;
+                    f4[i >> 1] = (nb << 4) | (b & 0x0F);
+                    fb[i] = clut_lut[nb];
+                    i++;
+                }
+            }
+        } else {
+            // ─── LITERAL ───────────────────────────────────────────────────
+            // count nibbles packed high-first into ceil(count/2) source bytes.
+            // Fast path: when i is even and ≥2 pixels remain, each source byte
+            // maps 1:1 to one f4 byte (XOR-equal for P-frames, overwrite for
+            // I-frames), and the two nibbles decode to fb[i] and fb[i+1] via
+            // CLUT lookup with NO nibble masking. ~3–4× faster than scalar.
+            uint32_t remaining = count;
+
+            // Leading half-byte: if i is odd, consume the high nibble of one
+            // source byte to realign, then the low nibble (now at even i).
+            if ((i & 1) && remaining > 0) {
+                int b = rle.read_byte();
+                if (b < 0) { *err_under = rle.err; return false; }
+                uint8_t hi = (uint8_t)((b >> 4) & 0x0F);
+                uint8_t lo = (uint8_t)(b & 0x0F);
+                // hi at odd i  → low nibble of f4[i>>1]
+                {
+                    uint8_t prev = f4[i >> 1];
+                    uint8_t pn   = prev & 0x0F;
+                    uint8_t cn   = is_pf ? (uint8_t)(hi ^ pn) : hi;
+                    f4[i >> 1] = (uint8_t)((prev & 0xF0) | cn);
+                    fb[i] = clut_lut[cn];
+                    i++; remaining--;
+                }
+                if (remaining > 0) {
+                    // lo at even i → high nibble of f4[i>>1]
+                    uint8_t prev = f4[i >> 1];
+                    uint8_t pn   = (uint8_t)((prev >> 4) & 0x0F);
+                    uint8_t cn   = is_pf ? (uint8_t)(lo ^ pn) : lo;
+                    f4[i >> 1] = (uint8_t)((cn << 4) | (prev & 0x0F));
+                    fb[i] = clut_lut[cn];
+                    i++; remaining--;
+                }
+            }
+
+            // Aligned bulk: 2 pixels per source byte, no nibble shuffle.
+            // Pull bytes directly from rle.buf in chunks to avoid per-byte
+            // function-call overhead; refill the buf only when it drains.
+            while (remaining >= 2) {
+                if (rle.buf_pos >= rle.buf_fill) {
+                    uint64_t rt = esp_timer_get_time();
+                    int r = rle.src->read(rle.buf, sizeof(rle.buf));
+                    rle.refill_t_us += esp_timer_get_time() - rt;
+                    rle.refill_n++;
+                    if (r <= 0) { *err_under = (r < 0); rle.buf_fill = 0; return false; }
+                    rle.buf_fill = r; rle.buf_pos = 0;
+                }
+                int available    = rle.buf_fill - rle.buf_pos;
+                int pair_pixels  = (int)(remaining >> 1);   // pairs we want this loop iter
+                int take         = available < pair_pixels ? available : pair_pixels;
+                const uint8_t *src_ptr = rle.buf + rle.buf_pos;
+                if (is_pf) {
+                    for (int k = 0; k < take; k++) {
+                        uint8_t new_byte = (uint8_t)(f4[i >> 1] ^ src_ptr[k]);
+                        f4[i >> 1] = new_byte;
+                        *(uint16_t *)(fb + i) = clut_pair[new_byte];
+                        i += 2;
+                    }
+                } else {
+                    for (int k = 0; k < take; k++) {
+                        uint8_t new_byte = src_ptr[k];
+                        f4[i >> 1] = new_byte;
+                        *(uint16_t *)(fb + i) = clut_pair[new_byte];
+                        i += 2;
+                    }
+                }
+                rle.buf_pos += take;
+                remaining   -= (uint32_t)(take << 1);
+            }
+
+            // Trailing single pixel (only the high nibble of one source byte).
+            if (remaining > 0) {
+                int b = rle.read_byte();
+                if (b < 0) { *err_under = rle.err; return false; }
+                uint8_t hi = (uint8_t)((b >> 4) & 0x0F);
+                uint8_t prev = f4[i >> 1];
+                uint8_t pn   = (uint8_t)((prev >> 4) & 0x0F);
+                uint8_t cn   = is_pf ? (uint8_t)(hi ^ pn) : hi;
+                f4[i >> 1] = (uint8_t)((cn << 4) | (prev & 0x0F));
+                fb[i] = clut_lut[cn];
+                i++; remaining--;
+            }
+        }
+    }
+    return true;
+}
+
 struct ProducerCtx {
     FboxSource         *src;            // CRC-wrapped source
     const FboxHeader   *hdr;
     const uint8_t      *clut_lut;
-    uint8_t            *frame_4bpp;     // PSRAM, PIXEL_COUNT/2 bytes — XOR baseline
+    const uint16_t     *clut_pair;      // 256-entry pair lookup, hot in decode
+    uint8_t            *frame_4bpp;     // INTERNAL SRAM, PIXEL_COUNT/2 bytes — XOR baseline
     Slot               *slots;
     SemaphoreHandle_t   sem_free;
     SemaphoreHandle_t   sem_ready;
     volatile bool      *cancel;
     bool                ran_to_eof;
     TaskHandle_t        task;
+    // Profiling totals (µs)
+    uint64_t            t_decode_us;    // per-pixel decode loop only
+    uint64_t            t_msync_us;     // esp_cache_msync
+    uint64_t            t_wait_free_us; // blocked on sem_free
+    uint64_t            t_refill_us;    // src->read calls during decode (SD/HTTP/PSRAM)
+    uint32_t            n_refills;      // count of src->read calls
+    uint32_t            n_frames;       // number of frames measured
 };
 
 void producerTask(void *param)
@@ -222,9 +425,11 @@ void producerTask(void *param)
     for (uint16_t fi = 0; fi < ctx->hdr->frame_count && !error; fi++) {
         if (*ctx->cancel) break;
 
+        uint64_t t_wait_start = esp_timer_get_time();
         while (xSemaphoreTake(ctx->sem_free, pdMS_TO_TICKS(50)) != pdTRUE) {
             if (*ctx->cancel) goto producer_exit;
         }
+        ctx->t_wait_free_us += esp_timer_get_time() - t_wait_start;
 
         Slot &s = ctx->slots[slot_idx];
         s.frame_idx = fi;
@@ -243,23 +448,26 @@ void producerTask(void *param)
             uint8_t *fb = s.frame_buf;
             uint8_t *f4 = ctx->frame_4bpp;
 
+            // Reader keeps its chunk buffer; we still need to reset the
+            // per-frame token state in case a previous frame ended mid-token
+            // due to truncation (it shouldn't in well-formed files, but the
+            // reset is cheap and defensive).
             rle.beginFrame((int)PIXEL_COUNT);
 
-            for (uint32_t i = 0; i < PIXEL_COUNT; i++) {
-                int raw = rle.next();
-                if (raw < 0) {
-                    error    = true;
-                    err_state = rle.err ? SLOT_UNDER : SLOT_ERR;
-                    break;
-                }
-                uint8_t prev_byte = f4[i >> 1];
-                uint8_t prev_nib  = (i & 1) ? (prev_byte & 0x0F) : ((prev_byte >> 4) & 0x0F);
-                uint8_t curr_nib  = is_pf ? ((uint8_t)raw ^ prev_nib) : (uint8_t)raw;
-                if (i & 1)
-                    f4[i >> 1] = (prev_byte & 0xF0) | curr_nib;
-                else
-                    f4[i >> 1] = (prev_byte & 0x0F) | (curr_nib << 4);
-                fb[i] = ctx->clut_lut[curr_nib];
+            uint64_t rt_before = rle.refill_t_us;
+            uint32_t rn_before = rle.refill_n;
+            uint64_t t_decode_start = esp_timer_get_time();
+            bool err_under = false;
+            bool dec_ok = decodeFrameTokens(rle, is_pf, fb, f4, ctx->clut_lut,
+                                            ctx->clut_pair, PIXEL_COUNT, &err_under);
+            ctx->t_decode_us += esp_timer_get_time() - t_decode_start;
+            ctx->t_refill_us += rle.refill_t_us - rt_before;
+            ctx->n_refills   += rle.refill_n    - rn_before;
+            ctx->n_frames++;
+
+            if (!dec_ok) {
+                error     = true;
+                err_state = err_under ? SLOT_UNDER : SLOT_ERR;
             }
         }
 
@@ -279,7 +487,9 @@ void producerTask(void *param)
         // PSRAM. Direction C2M (CPU→memory) is the default, called out for
         // clarity. Must complete before xSemaphoreGive so the consumer
         // sees flushed data when it takes the slot.
+        uint64_t t_msync_start = esp_timer_get_time();
         esp_cache_msync(s.frame_buf, PIXEL_COUNT, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+        ctx->t_msync_us += esp_timer_get_time() - t_msync_start;
 
         xSemaphoreGive(ctx->sem_ready);
         slot_idx = (slot_idx + 1) % RING_SLOTS;
@@ -340,12 +550,20 @@ PlaybackResult playFboxAnimation(FboxSource &src)
         }
     }
 
-    uint8_t clut_lut[16];
+    uint8_t  clut_lut[16];
+    uint16_t clut_pair[256];
     for (int i = 0; i < 16; i++) {
         uint16_t c = draw_color_palette[i];
         clut_lut[i] = (uint8_t)((((c >> 13) & 7) << 5) |
                                 (((c >>  8) & 7) << 2) |
                                  ((c >>  3) & 3));
+    }
+    // Precompute every 4bpp→8bpp nibble pair. clut_pair[byte] packs the two
+    // mapped pixels into a little-endian uint16 so the decoder can do one
+    // aligned 16-bit store to fb per source byte instead of two 8-bit stores.
+    for (int b = 0; b < 256; b++) {
+        clut_pair[b] = (uint16_t)clut_lut[(b >> 4) & 0x0F]
+                     | ((uint16_t)clut_lut[b & 0x0F] << 8);
     }
 
     // Memory layout:
@@ -381,14 +599,23 @@ PlaybackResult playFboxAnimation(FboxSource &src)
     pctx.src         = &crc_src;
     pctx.hdr         = &hdr;
     pctx.clut_lut    = clut_lut;
+    pctx.clut_pair   = clut_pair;
     pctx.frame_4bpp  = frame_4bpp;
     pctx.slots       = slots;
     pctx.sem_free    = sem_free;
     pctx.sem_ready   = sem_ready;
     pctx.cancel      = &cancel;
     pctx.ran_to_eof  = false;
+    pctx.t_decode_us = 0;
+    pctx.t_msync_us  = 0;
+    pctx.t_wait_free_us = 0;
+    pctx.t_refill_us = 0;
+    pctx.n_refills   = 0;
+    pctx.n_frames    = 0;
 
-    xTaskCreatePinnedToCore(producerTask, "fbox_dec", 8192, &pctx, 2, &pctx.task, 0);
+    // Stack 16 KB: the producer's FboxRleReader local (≈4 KB buf) + decode
+    // helpers + FreeRTOS overhead won't fit comfortably in the default 8 KB.
+    xTaskCreatePinnedToCore(producerTask, "fbox_dec", 16384, &pctx, 2, &pctx.task, 0);
 
     Serial.printf("[ANIM] play %u frames @ %u fps\n", hdr.frame_count, hdr.fps);
     uint32_t t_start     = millis();
@@ -474,6 +701,18 @@ PlaybackResult playFboxAnimation(FboxSource &src)
                   elapsed_ms ? (frames_drawn * 1000.0f / elapsed_ms) : 0.0f,
                   frames_drawn ? (unsigned long)(t_spi_total / frames_drawn) : 0ul,
                   frames_drawn ? (unsigned long)(t_wait_total / frames_drawn) : 0ul);
+    if (pctx.n_frames) {
+        uint64_t refill_total = pctx.t_refill_us;
+        Serial.printf("[ANIM] producer: decode_avg=%llums msync_avg=%lluus wait_free_avg=%lluus refill_avg=%lluus (n=%u)\n",
+                      pctx.t_decode_us  / pctx.n_frames / 1000,
+                      pctx.t_msync_us   / pctx.n_frames,
+                      pctx.t_wait_free_us / pctx.n_frames,
+                      refill_total / pctx.n_frames,
+                      pctx.n_frames);
+        Serial.printf("[ANIM] producer: refills/frame=%.1f refill_us/call=%llu\n",
+                      pctx.n_refills * 1.0f / pctx.n_frames,
+                      pctx.n_refills ? (refill_total / pctx.n_refills) : 0);
+    }
 
     // Audio decode (buffer-only) — only valid if the producer reached EOF, since
     // otherwise the source cursor isn't at the audio section.
@@ -525,10 +764,30 @@ PlaybackResult playFboxAnimationFromSD(const char *path)
     return playFboxAnimation(src);
 }
 
+PlaybackResult playFboxAnimationFromSDBuffered(const char *path, uint32_t ring_bytes)
+{
+    FboxSourceSD sd_src(path);
+    if (!sd_src.ok()) {
+        Serial.printf("playFboxAnimationFromSDBuffered: cannot open %s\n", path);
+        return PlaybackResult::READ_UNDERRUN;
+    }
+    FboxSourceRingBuffered buf_src(&sd_src, ring_bytes);
+    if (!buf_src.ok()) {
+        Serial.println("playFboxAnimationFromSDBuffered: ring alloc failed, falling back to direct SD");
+        return playFboxAnimation(sd_src);
+    }
+    Serial.printf("[ANIM] ring buffer: %lu KB PSRAM, async SD loader on core 1\n",
+                  (unsigned long)(ring_bytes / 1024));
+    PlaybackResult result = playFboxAnimation(buf_src);
+    Serial.printf("[ANIM] ring stalls=%u stall_time=%llums\n",
+                  buf_src.stallCount(), buf_src.stallTimeUs() / 1000);
+    return result;
+}
+
 std::vector<std::string> sdGetFboxFiles()
 {
     std::vector<std::string> fileNames;
-    File root = SD.open("/sketches/saved");
+    File root = SD_MMC.open("/sketches/saved");
     if (root)
     {
         File entry;

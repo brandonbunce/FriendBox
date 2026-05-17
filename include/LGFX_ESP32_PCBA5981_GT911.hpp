@@ -72,13 +72,13 @@ public:
     }
 
     {
-      auto cfg = _light_instance.config();
-      cfg.pin_bl      = 47;
-      cfg.invert      = false;
-      cfg.freq        = 44100;
-      cfg.pwm_channel = 7;
-      _light_instance.config(cfg);
-      _panel_instance.setLight(&_light_instance);
+      //auto cfg = _light_instance.config();
+      //cfg.pin_bl      = -1;
+      //cfg.invert      = false;
+      //cfg.freq        = 44100;
+      //cfg.pwm_channel = 7;
+      //_light_instance.config(cfg);
+      //_panel_instance.setLight(&_light_instance);
     }
 
     {
