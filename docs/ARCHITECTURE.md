@@ -172,20 +172,30 @@ The public API in `io.hpp`:
 ```
                        core 0                          core 1 (app-main)
                   ┌─────────────────┐              ┌────────────────────┐
-  FboxSource ──→  │  fbox_dec task  │  ──slot──→   │  displayAnim*      │
-  (SD/HTTP/PSRAM) │  RLE+XOR+CLUT    │              │  writeRawFrame8bpp │
-   wrapped by     │  one frame/slot │              │  waitVSync, flip   │
-   FboxSourceCrc  └─────────────────┘              └────────────────────┘
+                  │  fbox_dec task  │  ──slot──→   │  displayAnim*      │
+                  │  RLE+XOR+CLUT   │              │  writeRawFrame8bpp │
+                  │  (priority 2)   │              │  waitVSync, flip   │
+                  └─────────────────┘              ├────────────────────┤
+                          ↑                       │  fbox_ld task      │
+                          │                       │  (priority 2)      │
+  FboxSource ──→ FboxSourceCrc ──→ FboxSourceRingBuffered ──→ PSRAM ring
+  (SD/HTTP/PSRAM)                       (loader runs here ──────────────┘
+                                         on core 1, NOT core 0)
                           ↑                                  ↓
                           └───── sem_free  ←── 3-slot ring ──┘
                                  sem_ready (PSRAM, 32-byte aligned)
 ```
 
+Core placement matters: **decoder on core 0, SPI consumer + ring loader on core 1**. Wi-Fi tasks live on core 0 (ESP-IDF default) and used to preempt the loader for ~120 ms at a time when the loader was also on core 0 — that was the cause of "ring stalls" that capped fps at ~23.4 even after every other optimization. With the loader on core 1, SDIO's interrupt-driven I/O lets it co-exist cleanly with the SPI consumer (consumer is mostly blocked on SPI DMA, so the loader gets CPU when it has bytes to push). Both `playFboxAnimationFromSDBuffered` on a fully-dithered file and the all-static animation hit **24+ fps** with margin in this layout.
+
 Key invariants:
 - **One persistent `FboxRleReader` across all frames.** Its 4 KB chunk buffer pre-reads next-frame bytes; a per-frame reader would discard those and shift every frame's start offset, scrambling output and forcing an early EOF. Use `rle.beginFrame(pixel_count)` between frames to reset token state while preserving the buffer.
 - **Slot buffers are 32-byte aligned via `heap_caps_aligned_alloc(32, ..., MALLOC_CAP_SPIRAM)`.** Required so `esp_cache_msync(buf, n, ESP_CACHE_MSYNC_FLAG_DIR_C2M)` (called by the producer before signalling each slot ready) actually flushes the cache instead of failing the alignment check and silently no-op'ing. Without the writeback, core 1's DMA reads stale physical PSRAM.
-- **Producer task yields one tick per frame (`vTaskDelay(1)`).** Pinned to core 0 at priority 2, 16 KB stack (≈ 8 KB of which is the reader's chunk buffer + locals). Otherwise CPU-bound; without the yield, IDLE0 never runs and the task watchdog trips after 5 s of decoding when SPI is the bottleneck.
+- **Producer (`fbox_dec`) task pinned to core 0**, priority 2, 16 KB stack, `vTaskDelay(1)` per frame. Without the yield, IDLE0 never runs and the task watchdog trips after 5 s of decoding.
+- **Loader (`fbox_ld`) task pinned to core 1**, priority 2, 8 KB stack. Decisively: not core 0 — see the pipeline diagram note above. Under SDIO this avoids both decoder contention on core 0 and Wi-Fi-task preemption.
+- **Consumer pacing via `vTaskDelayUntil`.** Holds an absolute wake time across iterations; the older `do { handleTouch; vTaskDelay(2) } while (millis() < until)` form overshot the deadline by up to one tick per frame.
 - **`frame_4bpp` lives in internal SRAM, not PSRAM.** Allocated via `heap_caps_calloc(..., MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)`. CPU-only buffer (no DMA) hit ~3× per pixel in the decode hot path; internal SRAM ~1–3 cycles per access vs PSRAM ~10–30. 115,200 bytes.
+- **`FboxSourceSD` uses FATFS direct (`f_open`/`f_read`)**, skipping VFS + POSIX. Combined with the ring buffer (which is what the playback default uses) this trims ~150–250 µs of per-call overhead from the loader. The direct-SD path is slower this way (FATFS's `f_read` has less read-ahead than Arduino `fs::File`), so the convenience helper `playFboxAnimationFromSDBuffered` is the right entry point for animation playback.
 - **CRC32** is accumulated by `FboxSourceCrc` over header [62..127] + frame table + frame data + audio. Verified at end of playback when `hdr.crc32 != 0`.
 
 **Token-driven decoder.** The per-pixel decode loop is in `decodeFrameTokens()` in `io.cpp`. It dispatches on RLE token type instead of iterating pixel-by-pixel:
@@ -210,7 +220,7 @@ Key invariants:
 - `refill_us/call` = per-`File::readBytes` cost; sanity-check against SD bus speed.
 - `stalls` / `stall_time` = receive-side waits >1 ms inside `FboxSourceRingBuffered`. Non-zero means the ring drained at least once because SD couldn't keep up with content demand.
 
-**Current performance ceiling and the SD wall.** Mostly-static content plays at 24 fps cleanly (SPI is the wall, ~30 ms burst). Fully dithered content stalls because SD over SPI delivers ~1.3 MB/s while dithered demand is ~2.76 MB/s. This is the binding constraint, documented in detail in [docs/exec-plans/tech-debt-tracker.md](exec-plans/tech-debt-tracker.md) — the planned fix is migrating from SD-over-SPI to SD_MMC 4-bit mode (after a hardware audit of the SD slot wiring). Don't expect arbitrary-complexity 24 fps until that lands.
+**Current performance.** Both mostly-static and fully-dithered 480×480 content play at **24+ fps with margin**. The remaining wall is the LT7680 SPI burst (~30 ms/frame at 80 MHz = 33 fps theoretical ceiling). Full perf history and the full sequence of changes that got us here in [docs/exec-plans/tech-debt-tracker.md](exec-plans/tech-debt-tracker.md).
 
 **Audio:** IMA ADPCM decode lives in `audio.cpp` / `audio.hpp`. `fboxDecodeAudio` reads the trailing audio section from the source and produces an in-PSRAM int16 PCM buffer (`FboxAudio`). Capped at `FBOX_AUDIO_PSRAM_CAP` = 1 MB (~23 s at 22050 Hz mono). No I2S output yet — speaker hardware is planned. Known handoff bug: bytes still buffered inside the producer's `FboxRleReader` at video EOF are the first bytes of the audio section, so `fboxDecodeAudio` reading the source directly skips them and the decoded PCM starts mid-block. Documented in the `playFboxAnimation` source. Fix when audio output lands: route audio reads through a shared buffered source.
 

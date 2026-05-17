@@ -6,29 +6,49 @@
 
 // ── FboxSourceSD ────────────────────────────────────────────────────────────
 
-FboxSourceSD::FboxSourceSD(const char *path) : _path(path)
+// FATFS path conversion: SD_MMC mounts the FATFS volume at drive "0:".
+// Callers pass paths in VFS form ("/sketches/foo.fbox"). Strip any "/sd"
+// mountpoint prefix and prepend "0:" for FATFS direct calls.
+static String _fatfs_path(const char *path)
 {
-    _f = SD_MMC.open(path, FILE_READ);
-    if (_f) _size = _f.size();
+    String out = "0:";
+    if (strncmp(path, "/sd/", 4) == 0)      out += path + 3;   // keep leading '/'
+    else if (strcmp(path, "/sd") == 0)      out += "/";
+    else if (path[0] != '/')                { out += "/"; out += path; }
+    else                                    out += path;
+    return out;
+}
+
+FboxSourceSD::FboxSourceSD(const char *path)
+{
+    String fp = _fatfs_path(path);
+    FRESULT fr = f_open(&_fil, fp.c_str(), FA_READ);
+    if (fr != FR_OK) {
+        Serial.printf("[FBOX-SD] f_open(%s) failed: %d\n", fp.c_str(), fr);
+        return;
+    }
+    _ok   = true;
+    _size = (uint32_t)f_size(&_fil);
 }
 
 FboxSourceSD::~FboxSourceSD()
 {
-    if (_f) _f.close();
+    if (_ok) f_close(&_fil);
 }
 
 int FboxSourceSD::read(uint8_t *dst, size_t n)
 {
-    if (!_f) return -1;
-    int r = (int)_f.readBytes((char *)dst, n);
-    if (r <= 0) return _f.available() ? -1 : 0;
-    return r;
+    if (!_ok) return -1;
+    UINT bytes_read = 0;
+    FRESULT fr = f_read(&_fil, dst, (UINT)n, &bytes_read);
+    if (fr != FR_OK) return -1;
+    return (int)bytes_read;
 }
 
 bool FboxSourceSD::reset()
 {
-    if (!_f) return false;
-    return _f.seek(0);
+    if (!_ok) return false;
+    return f_lseek(&_fil, 0) == FR_OK;
 }
 
 // ── FboxSourcePSRAM ─────────────────────────────────────────────────────────
@@ -62,17 +82,18 @@ FboxSourceRingBuffered::FboxSourceRingBuffered(FboxSource *inner, uint32_t ring_
         Serial.println("[FBOX-RING] xStreamBufferCreateStatic failed");
         return;
     }
-    // Pin loader to core 0 alongside the decoder. Earlier attempt on core 1
-    // (with the SPI consumer) saw the loader's SPI-DMA ISRs preempt the main
-    // task between frames — visible as a ~66 ms/frame gap that wasn't in any
-    // measured stage. Core 0 has the decoder, but once the ring is in place
-    // the decoder is PSRAM-bound (~39 ms decode) and spends most of each
-    // cycle blocked on sem_free, so there's ample core-0 headroom for the
-    // loader's SD I/O.
+    // Pin loader to core 1 alongside the SPI consumer (main task). Core 0
+    // hosts the decoder + Wi-Fi background tasks (Wi-Fi is core-0-pinned in
+    // ESP-IDF). With Wi-Fi paused during playback (esp_wifi_stop) and SDIO's
+    // interrupt-driven I/O (the loader yields naturally during DMA), running
+    // on core 1 avoids decoder-loader contention on core 0 and Wi-Fi-task
+    // preemption of the loader — which was the cause of the ~120 ms ring-
+    // drain stalls observed at 24 fps target.
     // 8 KB stack: SD/FATFS calls + xStreamBufferSend internals + 4 KB chunk
-    // local easily exceed 4 KB and trip the FreeRTOS stack-canary panic.
+    // local fit comfortably; FreeRTOS stack-canary check is the canary on
+    // overruns.
     BaseType_t ok = xTaskCreatePinnedToCore(loaderTrampoline, "fbox_ld",
-                                            8192, this, 2, &_loader_task, 0);
+                                            8192, this, 2, &_loader_task, 1);
     if (ok != pdPASS) {
         vStreamBufferDelete(_stream); _stream = nullptr;
         free(_storage); _storage = nullptr;
@@ -108,8 +129,12 @@ void FboxSourceRingBuffered::loaderTrampoline(void *arg)
 
 void FboxSourceRingBuffered::loaderLoop()
 {
-    // 4 KB inner chunk size matches the FboxRleReader's own buf size on the
-    // playback side, keeping per-call SD overhead amortised at both ends.
+    // 4 KB inner chunks: empirically the sweet spot. Bigger chunks (tried
+    // 16 KB) reduce per-call FATFS overhead but widen the window between
+    // produces — every "ring drains" stall grows from ~0.85 ms (4 KB SDIO
+    // wall time) to ~3.4 ms (16 KB), and the decoder's sub-ms-per-4-KB
+    // demand outpaces those bigger fills. Net result: dithered fps dropped
+    // 22.6 → 20.5 going from 4 KB to 16 KB. Keep at 4 KB.
     static const size_t kChunk = 4096;
     uint8_t chunk[kChunk];
 
@@ -128,11 +153,12 @@ void FboxSourceRingBuffered::loaderLoop()
                                          pdMS_TO_TICKS(100));
             sent += s;
         }
-        // Yield one tick per chunk. The Arduino-ESP32 SD library uses polling-
-        // mode SPI for parts of a read, so File::readBytes is CPU-active for
-        // most of its duration rather than blocking. Without this yield, the
-        // loader never drops below its priority and IDLE0 starves → task WDT.
-        vTaskDelay(1);
+        // No explicit yield needed on SDIO: the ESP-IDF SDMMC host is
+        // interrupt-driven, so SD_MMC.read() naturally blocks the loader task
+        // during DMA — IDLE0 / decoder get CPU. The old vTaskDelay(1) here
+        // was a workaround for SD-over-SPI's polling-mode behaviour and
+        // imposed ~30 ms of forced delay per frame on dithered content,
+        // which prevented the ring from staying ahead of decoder demand.
     }
     _eof = true;
     _loader_done = true;   // signal destructor before we vanish

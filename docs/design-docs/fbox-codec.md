@@ -184,24 +184,16 @@ PSRAM during playback: ~690 KB for the slot ring, up to ~1.7 MB with audio. Inte
 
 ## Performance ceiling and content complexity
 
-Realistic 24 fps playback depends on the source bandwidth keeping up with the encoded bitrate. Today's reality (FriendBox PCBA5981, ESP32-S3 + SD over SPI at 40 MHz):
+Post-SDIO + ring-buffered decoder, **all content shapes hit 24+ fps with headroom**. The binding constraint is now the LT7680 SPI burst at 80 MHz (~30 ms/frame ≈ 33 fps theoretical), not source bandwidth.
 
-| Content shape | Source bytes/frame | Source MB/s @ 24 fps | Fits SD ceiling (~1.3 MB/s)? | Playback |
+| Content shape | Source bytes/frame | Source MB/s @ 24 fps | Headroom (SDIO ~4.7 MB/s) | Playback |
 |---|---:|---:|---|---|
-| White background + sparse motion | ~1–5 KB | ~0.1 MB/s | yes, plenty of headroom | 24 fps, SPI-bound |
-| Mixed content / typical sketches | ~10–40 KB | ~0.5 MB/s | yes | 24 fps, SPI-bound |
-| Heavy motion, partial dither | ~40–80 KB | ~1.4 MB/s | borderline | 18–24 fps, ring stalls likely |
-| Fully dithered, no compression headroom | ~115 KB | ~2.8 MB/s | **no, ~2× over SD ceiling** | ~9 fps with `FboxSourceRingBuffered` |
+| White background + sparse motion | ~1–5 KB | ~0.1 MB/s | 40× | 24 fps, SPI-bound |
+| Mixed content / typical sketches | ~10–40 KB | ~0.5 MB/s | 10× | 24 fps, SPI-bound |
+| Heavy motion, partial dither | ~40–80 KB | ~1.4 MB/s | 3× | 24 fps, SPI-bound |
+| Fully dithered, no compression headroom | ~115 KB | ~2.8 MB/s | 1.7× | **24.4 fps**, measured |
 
-The SD bandwidth wall is the binding constraint above the "borderline" row. It will be addressed by migrating to SD_MMC 4-bit mode (planned, see [exec-plans/tech-debt-tracker.md](../exec-plans/tech-debt-tracker.md)).
-
-**Until that lands, content recommendations:**
-
-1. Keep dithered animations small enough to comfortably preload to PSRAM (~6 MB cap with current playback PSRAM use). The existing `FboxSourcePSRAM` source already handles this if the caller does the `ps_malloc` + bulk-load.
-2. Server-side: limit dither density on long animations; prefer 240×240 sticker format for very complex content.
-3. UI should treat `header.fps` as a *ceiling*, not a guarantee, and surface "complex content, best-effort rate" for animations whose source size exceeds the SD ceiling for their stated fps.
-
-`FboxSourceRingBuffered` (see [ARCHITECTURE.md](../ARCHITECTURE.md#iocpp--iohpp)) is the recommended SD playback path for everything but trivial sketches — it pipelines SD reads with decode and SPI, so it's strictly faster than direct SD whenever there's PSRAM headroom for the ring (default 2 MB).
+`FboxSourceRingBuffered` (the default SD playback path, see [ARCHITECTURE.md](../ARCHITECTURE.md#iocpp--iohpp)) pipelines SDIO with decode + SPI across both cores. The path has been validated to 24 fps on worst-case dithered content; mostly-static content is comfortably SPI-bound.
 
 ---
 

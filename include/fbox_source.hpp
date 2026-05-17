@@ -8,6 +8,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/stream_buffer.h>
+#include <ff.h>
 
 /* Abstract sequential byte source for FBOX playback. Implementations wrap
  * SD files, PSRAM-resident buffers, or HTTP streams. The playback core only
@@ -41,12 +42,17 @@ public:
     bool     reset() override;
     uint32_t size() const override { return _size; }
 
-    bool ok() const { return _f; }
+    bool ok() const { return _ok; }
 
 private:
-    File     _f;
+    // Uses FATFS FIL directly instead of Arduino's fs::File / VFS path.
+    // Skipping the VFS + POSIX wrappers saves ~150–250 µs of per-call overhead
+    // on each File::readBytes — measurable in the playback profile as a drop
+    // in `refill_us/call`. SD_MMC.begin() already mounts the FATFS volume
+    // (at drive "0:"), so we just open the path against that same volume.
+    FIL      _fil;
+    bool     _ok   = false;
     uint32_t _size = 0;
-    String   _path;
 };
 
 class FboxSourcePSRAM : public FboxSource

@@ -99,7 +99,8 @@ void setup()
   initMenuButton();
   initFriendbox();
   playSketchFromServer("1778969174678"); // Kitty Dithered 24fps
-  playFboxAnimationFromSDBuffered("/sketches/received/1778969174678.fbox"); // Kitty Dithered 24fps
+  playFboxAnimationFromSDBuffered("/sketches/received/1778969174678.fbox"); // Kitty Dithered 24fps PSRAM
+  playSketchFromServer("1775852425606"); // J's Animation :)
   playSketchFromServer("1776835153465"); // Ben Troll Physics 24fps
   playSketchFromServer("1776836243916"); // Troll Physics 4 16fps
   //playFboxAnimationFromSD("/sketches/received/1778392265348.fbox");

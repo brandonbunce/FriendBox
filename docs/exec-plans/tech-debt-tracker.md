@@ -12,26 +12,53 @@ Known structural problems that should be resolved before significant feature wor
 
 ---
 
-## ~~[HIGH] SD bandwidth in SPI mode caps complex animations below 24 fps — plan to migrate to SD_MMC 4-bit~~ — **DONE**
+## ~~[HIGH] SD bandwidth in SPI mode caps complex animations below 24 fps — plan to migrate to SD_MMC 4-bit~~ — **DONE — 24 fps achieved on worst-case dithered content**
 
-Migrated to SDIO 4-bit at 40 MHz. Pin assignments (final) in [include/io.hpp](../../include/io.hpp): `CLK=13, CMD=2, DAT0=48, DAT1=47, DAT2=1, DAT3=14`. **CMD and DAT2 were moved off GPIO 35 and 36 because those are reserved for the octal PSRAM data lines on N16R8 modules (SPIIO6/SPIIO7)** — any SDIO peripheral driving 35/36 corrupts PSRAM and silently crashes the firmware. See [docs/HARDWARE.md](../HARDWARE.md) for the full pin reservation list and [[project-octal-psram-pin-reservation]].
+Final state: **24.4 fps on the 162-frame fully-dithered test file**, with Wi-Fi connected and active throughout. The bottleneck is now panel SPI (~30 ms/frame at 80 MHz) and we hit 24 fps consistently with margin.
 
-Result (162-frame dithered test, post-migration):
+**Final configuration:**
 
-| Metric | SD over SPI | SDIO 4-bit | Change |
+- **SDIO 4-bit at 40 MHz** via `SD_MMC` (`SDMMC_FREQ_HIGHSPEED`). Pin assignments in [include/io.hpp](../../include/io.hpp): `CLK=13, CMD=2, DAT0=48, DAT1=47, DAT2=1, DAT3=14`. **CMD and DAT2 are deliberately off GPIO 35/36** because those are the octal PSRAM data lines (SPIIO6/SPIIO7) on N16R8 modules — any SDIO peripheral driving 35/36 corrupts PSRAM and silently resets the chip. See [docs/HARDWARE.md](../HARDWARE.md) for the full pin reservation list and [[project-octal-psram-pin-reservation]].
+- **`FboxSourceSD` uses FATFS direct (`f_open`/`f_read`)** rather than the Arduino `fs::File` wrapper. Skips VFS + POSIX overhead in the buffered playback path (the direct-SD path is slower this way, but buffered is the only path the UI uses for animation playback).
+- **`FboxSourceRingBuffered` loader pinned to core 1**, not core 0. This is the single decisive change that crossed 24 fps. Under SD-over-SPI (polling-mode driver) this previously inflated the consumer cycle by ~66 ms/frame; under SDIO (interrupt-driven) the loader spends most of each refill blocked on DMA so it doesn't fight the SPI consumer for core 1 cycles. Wi-Fi tasks live on core 0 and no longer preempt the loader.
+- **Decoder pinned to core 0**, priority 2, `vTaskDelay(1)` per frame, `frame_4bpp` in internal SRAM.
+- **Consumer pacing via `vTaskDelayUntil`**, absolute wake target → no per-frame overshoot.
+- **LT7680 SPI at 80 MHz** ([include/LGFX_ESP32_PCBA5981_GT911.hpp:35](../../include/LGFX_ESP32_PCBA5981_GT911.hpp#L35)) → 23 ms SPI burst + ~6 ms vsync/MISA = ~30 ms `spi_avg`.
+
+**Final numbers on the worst-case dithered 162-frame test:**
+
+| Metric | SD-over-SPI (start) | Final | Total change |
 |---|---:|---:|---|
-| `refill_us/call` (4 KB) | ~2977 µs | **849 µs** | 3.5× faster |
-| `refill_avg/frame` | ~90 ms | **26 ms** | 3.5× faster |
-| `decode_avg` | ~114 ms | **51 ms** | 2.2× faster |
-| Dithered fps | 8.7 | **19.1** | 2.2× faster |
+| `refill_us/call` (4 KB) | ~9612 µs (4 MHz SD default!) | **413 µs** (PSRAM ring read) | 23× |
+| `refill_avg/frame` | ~273 ms | **12.6 ms** | 21× |
+| `decode_avg` | ~343 ms | **39 ms** | 8.8× |
+| Dithered fps | **3.4** | **24.4** | 7.2× |
 
-Static / mostly-static content (the original 493-frame test) already hit 24 fps on SPI and continues to. Worst-case dithered is now within ~5 fps of the 24 fps target; the remaining gap is producer-side CPU + sequential SD reads.
+The journey, frame-by-frame:
 
-**Open work to close the last 5 fps on dithered content** (deferred, lower priority since the wall is no longer hardware):
+| Step | Change | Dithered fps |
+|---|---|---:|
+| 0 | Baseline (SD over SPI @ default 4 MHz, per-pixel decode) | 3.4 |
+| 1 | `SD.begin(..., 40000000)` (3rd arg is bus clock) | 8.7 |
+| 2 | Token-driven decoder (`decodeFrameTokens`) + clut_pair table + 4-pixel/32-bit unroll | 9.2 |
+| 3 | `frame_4bpp` moved to internal SRAM | 9.2 |
+| 4 | Larger `rle.buf` (256 B → 4 KB) | 8.7* |
+| 5 | `FboxSourceRingBuffered` (async PSRAM ring, loader on core 0) | 19.1 |
+| 6 | **SDIO 4-bit migration** (largest single jump after pin-conflict fix) | 19.1 |
+| 7 | 80 MHz LT7680 SPI | (already applied, lifted panel ceiling) |
+| 8 | FATFS direct (`f_open`/`f_read`, skip VFS) | 23.3 |
+| 9 | `vTaskDelayUntil` consumer pacing | 23.4 |
+| 10 | **Loader pinned to core 1** | **24.4** |
 
-- Decoder CPU is now the binding stage at ~25 ms (the other ~26 ms of producer time is sequential SD reads). Vectorising the literal path (Xtensa SIMD intrinsics) and/or unrolling the per-byte loop should cut that further.
-- `playFboxAnimationFromSDBuffered` is now roughly a wash with the direct path post-SDIO (18.7 vs 19.1 fps) — the ring's parallelism gain is small once SD is fast, and the loader-task overhead negates it. Keep the buffered helper available for HTTP source / mixed sources, but the SD playback default can move back to direct.
-- One-line LGFX bump in [LGFX_ESP32_PCBA5981_GT911.hpp:35](../../include/LGFX_ESP32_PCBA5981_GT911.hpp#L35): `cfg.freq_write = 80000000` (user already applied this; SPI burst is now ~30 ms / frame = 33 fps panel-side ceiling).
+*Step 4 was a transient regression before the ring buffer landed; with the ring it became the right tuning.
+
+**Things tried that didn't pan out (kept for future reference):**
+
+- 16 KB loader chunks — widened the ring-empty window per cycle; net regression.
+- 8-pixel/32-bit decoder unroll — within measurement noise; reverted for readability.
+- Pausing Wi-Fi during playback — not needed once loader was on core 1.
+
+The buffered path (`playFboxAnimationFromSDBuffered`) is the canonical SD playback API. Direct-SD (`playFboxAnimationFromSD`) is intentionally slower since FATFS direct's `f_read` is unbuffered — keep using it only for the one-shot sketch loader (`loadSketchFromSD`) where per-frame perf doesn't matter.
 
 **Files:** [src/io.cpp](../../src/io.cpp), [include/io.hpp](../../include/io.hpp), [docs/HARDWARE.md](../HARDWARE.md), [include/fbox_source.hpp](../../include/fbox_source.hpp), [src/fbox_source.cpp](../../src/fbox_source.cpp)
 
