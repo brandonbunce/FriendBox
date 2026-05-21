@@ -51,19 +51,6 @@ bool FboxSourceSD::reset()
     return f_lseek(&_fil, 0) == FR_OK;
 }
 
-// ── FboxSourcePSRAM ─────────────────────────────────────────────────────────
-
-int FboxSourcePSRAM::read(uint8_t *dst, size_t n)
-{
-    if (!_base) return -1;
-    if (_cursor >= _len) return 0;
-    uint32_t remaining = _len - _cursor;
-    size_t   take      = (n < remaining) ? n : remaining;
-    memcpy(dst, _base + _cursor, take);
-    _cursor += take;
-    return (int)take;
-}
-
 // ── FboxSourceRingBuffered ──────────────────────────────────────────────────
 
 FboxSourceRingBuffered::FboxSourceRingBuffered(FboxSource *inner, uint32_t ring_bytes)

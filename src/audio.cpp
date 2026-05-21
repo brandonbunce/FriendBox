@@ -1,5 +1,4 @@
 #include "audio.hpp"
-#include <esp_heap_caps.h>
 
 // IMA ADPCM tables — ported verbatim from FriendBox-Server/fbox.py
 static const int16_t kStepTable[89] = {
@@ -37,14 +36,15 @@ void ImaAdpcmDecoder::resetFromBlockHeader(const uint8_t *hdr4)
     // hdr4[3] reserved
 }
 
-void ImaAdpcmDecoder::decodePayload(const uint8_t *payload508, int16_t *out)
+void ImaAdpcmDecoder::decodeOneBlock(const uint8_t *payload, int16_t *out, uint16_t samples)
 {
     int32_t pred = predictor;
     int32_t step_idx = step_index;
-    uint32_t out_i = 0;
+    uint16_t out_i = 0;
 
-    for (int i = 0; i < FBOX_ADPCM_SAMPLES_PER_BLOCK / 2; i++) {
-        uint8_t byte = payload508[i];
+    uint16_t pairs = samples >> 1;
+    for (uint16_t i = 0; i < pairs; i++) {
+        uint8_t byte = payload[i];
         // LSB-first nibble order per fbox spec
         uint8_t codes[2] = { (uint8_t)(byte & 0x0F), (uint8_t)(byte >> 4) };
         for (int k = 0; k < 2; k++) {
@@ -59,76 +59,20 @@ void ImaAdpcmDecoder::decodePayload(const uint8_t *payload508, int16_t *out)
             out[out_i++] = (int16_t)pred;
         }
     }
+    // Odd trailing sample (encoder zero-pads but the trailing nibble may still
+    // exist in the payload).
+    if (samples & 1) {
+        uint8_t code = payload[pairs] & 0x0F;
+        int32_t step = kStepTable[step_idx];
+        int32_t delta = step >> 3;
+        if (code & 4) delta += step;
+        if (code & 2) delta += step >> 1;
+        if (code & 1) delta += step >> 2;
+        pred     = _clamp_i16(pred + ((code & 8) ? -delta : delta));
+        step_idx = _clamp_step(step_idx + kIndexTable[code]);
+        out[out_i++] = (int16_t)pred;
+    }
+
     predictor  = (int16_t)pred;
     step_index = (int8_t)step_idx;
-}
-
-bool fboxDecodeAudio(FboxSource &src, const FboxHeader &hdr, FboxAudio &out)
-{
-    out.pcm = nullptr;
-    out.sample_rate = hdr.audio_sample_rate;
-    out.sample_count = 0;
-
-    if (hdr.audio_size == 0) return true;
-    if (hdr.audio_size % FBOX_ADPCM_BLOCK_SIZE != 0) {
-        Serial.printf("[AUDIO] bad audio_size %lu (not multiple of %d)\n",
-                      (unsigned long)hdr.audio_size, FBOX_ADPCM_BLOCK_SIZE);
-        return false;
-    }
-
-    uint32_t n_blocks = hdr.audio_size / FBOX_ADPCM_BLOCK_SIZE;
-    uint32_t n_samples = n_blocks * FBOX_ADPCM_SAMPLES_PER_BLOCK;
-    uint32_t pcm_bytes = n_samples * 2;
-
-    if (pcm_bytes > FBOX_AUDIO_PSRAM_CAP) {
-        Serial.printf("[AUDIO] %lu PCM bytes exceeds cap %u — skipping decode\n",
-                      (unsigned long)pcm_bytes, FBOX_AUDIO_PSRAM_CAP);
-        // Still consume the bytes so the cursor ends at EOF.
-        uint8_t scratch[512];
-        uint32_t remaining = hdr.audio_size;
-        while (remaining > 0) {
-            int chunk = src.read(scratch, remaining > sizeof(scratch) ? sizeof(scratch) : remaining);
-            if (chunk <= 0) break;
-            remaining -= (uint32_t)chunk;
-        }
-        return false;
-    }
-
-    out.pcm = (int16_t *)ps_malloc(pcm_bytes);
-    if (!out.pcm) {
-        Serial.printf("[AUDIO] ps_malloc %lu bytes failed\n", (unsigned long)pcm_bytes);
-        return false;
-    }
-
-    ImaAdpcmDecoder dec;
-    uint8_t block[FBOX_ADPCM_BLOCK_SIZE];
-    int16_t *out_ptr = out.pcm;
-
-    for (uint32_t bi = 0; bi < n_blocks; bi++) {
-        uint32_t read_total = 0;
-        while (read_total < FBOX_ADPCM_BLOCK_SIZE) {
-            int r = src.read(block + read_total, FBOX_ADPCM_BLOCK_SIZE - read_total);
-            if (r <= 0) {
-                Serial.printf("[AUDIO] short read at block %lu (%lu/%d)\n",
-                              (unsigned long)bi, (unsigned long)read_total, FBOX_ADPCM_BLOCK_SIZE);
-                free(out.pcm); out.pcm = nullptr;
-                return false;
-            }
-            read_total += (uint32_t)r;
-        }
-        dec.resetFromBlockHeader(block);
-        dec.decodePayload(block + 4, out_ptr);
-        out_ptr += FBOX_ADPCM_SAMPLES_PER_BLOCK;
-    }
-
-    out.sample_count = n_samples;
-    Serial.printf("[AUDIO] decoded %lu samples @ %u Hz (%lu bytes PCM)\n",
-                  (unsigned long)n_samples, hdr.audio_sample_rate, (unsigned long)pcm_bytes);
-    return true;
-}
-
-void fboxAudioFree(FboxAudio &a)
-{
-    if (a.pcm) { free(a.pcm); a.pcm = nullptr; }
-    a.sample_count = 0;
 }

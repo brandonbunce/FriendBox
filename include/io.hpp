@@ -25,27 +25,34 @@ extern Preferences nvs;
 /** How long should button be pressed before logically registering input? */
 #define DEBOUNCE_MILLISECONDS 50
 
-// FBOX format constants
-#define FBOX_HEADER_SIZE 128
-#define FBOX_VERSION_3   3    // XOR delta + RLE video, IMA ADPCM audio, CRC32
+// FBOX format constants — v4: interleaved audio per frame, skip-frame markers,
+// trailing keyframe offset table. Header grew from 128 to 512 bytes; per-frame
+// chunk = [1 byte type 'I'/'P'/'S'][N-byte ADPCM block (optional)][video RLE].
+#define FBOX_HEADER_SIZE 512
+#define FBOX_VERSION     4
 
-// Frame type bytes — first byte of each frame payload in the frame data section
-#define FBOX_FRAME_I     0x49  // 'I' — intra-frame: full RLE-encoded 4bpp pixels
-#define FBOX_FRAME_P     0x50  // 'P' — delta-frame:  RLE-encoded (current XOR previous)
+// Frame type bytes — first byte of each frame chunk.
+#define FBOX_FRAME_I     0x49  // 'I' — intra: full RLE-encoded 4bpp pixels
+#define FBOX_FRAME_P     0x50  // 'P' — delta: RLE-encoded (current XOR previous)
+#define FBOX_FRAME_S     0x53  // 'S' — skip: no video bytes; reuse previous frame
 
 struct FboxHeader {
-    uint8_t  version;            // FBOX_VERSION_3
-    uint8_t  kind;               // 0=sketch, 1=animation
+    uint8_t  version;                  // FBOX_VERSION
+    uint8_t  kind;                     // 0=sketch, 1=animation
     uint16_t frame_count;
     uint16_t fps;
     uint16_t width;
     uint16_t height;
-    uint32_t created;            // Unix timestamp
-    char     username[33];       // null-terminated, 32 chars max
-    uint32_t audio_size;         // bytes of IMA ADPCM audio (0=none)
-    uint16_t audio_sample_rate;  // Hz (0 if no audio)
-    uint8_t  audio_channels;     // 1=mono (0 if no audio)
-    uint32_t crc32;              // CRC32 over file bytes [62..EOF]; 0=skip
+    uint32_t created;                  // Unix timestamp
+    char     username[33];             // null-terminated, 32 chars max
+    uint32_t expected_file_size;       // total file bytes; cheap truncation check
+    uint16_t audio_sample_rate;        // Hz (0 if no audio)
+    uint8_t  audio_channels;           // 1=mono (0 if no audio)
+    uint16_t audio_samples_per_frame;  // = sample_rate / fps (0 if no audio)
+    uint32_t crc32;                    // CRC32 over file bytes [64..EOF]; 0=skip
+    uint16_t keyframe_count;           // 0 if no keyframe table
+    uint32_t keyframe_table_offset;    // absolute file offset; 0 if absent
+    char     description[256];         // null-terminated, 255 chars max
 };
 
 /* Result of a playback attempt. Callers use this to decide whether to retry,
@@ -74,15 +81,23 @@ void saveImageToSD(int slot);
 void loadImageFromSD(int slot);
 std::vector<std::string> sdGetFboxFiles();
 
-/** Parse the 128-byte FBOX header from a source positioned at byte 0.
- *  Returns false if the magic is wrong or version unsupported.
- *  If raw_out != nullptr, the raw 128 header bytes are copied there so the
- *  caller can compute the partial CRC over bytes [62..127]. */
-bool fboxReadHeader(FboxSource &src, FboxHeader &out, uint8_t *raw_out = nullptr);
+/** Parse the 512-byte FBOX v4 header from a source positioned at byte 0.
+ *  Returns false on bad magic, wrong version, or file-size mismatch.
+ *  If crc_seed_out != nullptr, writes the CRC32 accumulator seed computed
+ *  from header bytes [64..511] — this is the value to pass to FboxSourceCrc
+ *  so the full-file CRC covers the header. The raw header bytes themselves
+ *  are not exposed (they used to be, but the 512-byte stack allocation pushed
+ *  loopTask into its canary band on the playback path). */
+bool fboxReadHeader(FboxSource &src, FboxHeader &out, uint32_t *crc_seed_out = nullptr);
 
-/** Streaming RLE decoder for FBOX v3 frame payloads (I-frames and P-frames).
+/** Streaming RLE decoder for FBOX v4 video frame payloads (I-frames and P-frames).
  *  Returns raw 4-bit nibbles; the caller applies XOR delta for P-frames.
- *  Internal 256-byte chunk buffer reduces source-side calls ~100× versus 1-byte reads. */
+ *  Internal 4 KB chunk buffer reduces source-side calls ~100× versus 1-byte reads.
+ *
+ *  v4 bounded-read mode: each per-frame call to `beginFrame` accepts a `byte_budget`.
+ *  The chunk-buffer refill clamps to remaining budget so the reader cannot
+ *  consume bytes belonging to the next frame's audio chunk. Pass -1 for unbounded
+ *  (legacy). */
 struct FboxRleReader {
     FboxSource *src;
     int      pixels_left;
@@ -94,16 +109,17 @@ struct FboxRleReader {
 
     // Chunk buffer: fills from source N bytes at a time. Sized large enough
     // (4 KB) that even literal-heavy frames (≈115 KB source/frame for full
-    // dithered content) refill < 30× per frame instead of ≈450×. Each
-    // File::readBytes call carries FATFS + VFS mutex overhead, so refill
-    // count dominates SD-source decode time for literal-heavy content.
+    // dithered content) refill < 30× per frame instead of ≈450×.
     uint8_t buf[4096];
     int     buf_pos;
     int     buf_fill;
     bool    err;
 
+    // Per-frame byte budget. Decremented by each refill from src->read.
+    // -1 = unbounded. Refill clamps to min(sizeof(buf), budget_left).
+    int32_t budget_left;
+
     // Refill profiling: cumulative time and count of src->read calls.
-    // Updated by read_byte and any external bulk-refill path.
     uint64_t refill_t_us;
     uint32_t refill_n;
 
@@ -111,31 +127,39 @@ struct FboxRleReader {
         src = s; pixels_left = pixel_count;
         in_run = false; token_count = 0; lit_hi_valid = false;
         buf_pos = 0; buf_fill = 0; err = false;
+        budget_left = -1;
         refill_t_us = 0; refill_n = 0;
     }
 
     /* Reset per-frame decode state for streaming playback. Keeps the chunk
      * buffer intact so any bytes the previous frame's decode pre-read (up to
-     * 256) are consumed first — without this, the over-read bytes would be
-     * lost when the reader is discarded between frames, shifting every
-     * subsequent frame's start offset and producing visual chaos. The encoder
-     * emits one fresh RLE token stream per frame, so token state resets cleanly. */
-    void beginFrame(int pixel_count) {
+     * 4 KB) are consumed first.
+     *
+     * byte_budget: -1 = unbounded. ≥0 = maximum bytes this frame's video
+     * payload may consume from src. Refill clamps. Bytes already in `buf` at
+     * call time count toward the budget (caller must include them in the
+     * budget value — typically buf_fill - buf_pos remain from previous frame). */
+    void beginFrame(int pixel_count, int32_t byte_budget = -1) {
         pixels_left = pixel_count;
         in_run = false; token_count = 0; lit_hi_valid = false;
         err = false;
+        budget_left = byte_budget;
     }
 
     // Returns next raw byte from the source, or -1 on EOF/error.
     int read_byte() {
         if (buf_pos >= buf_fill) {
+            if (budget_left == 0) { err = false; return -1; }   // frame boundary
+            size_t want = sizeof(buf);
+            if (budget_left > 0 && (int32_t)want > budget_left) want = (size_t)budget_left;
             uint64_t t = esp_timer_get_time();
-            int r = src->read(buf, sizeof(buf));
+            int r = src->read(buf, want);
             refill_t_us += esp_timer_get_time() - t;
             refill_n++;
             if (r <= 0) { err = (r < 0); buf_fill = 0; return -1; }
             buf_fill = r;
             buf_pos  = 0;
+            if (budget_left > 0) budget_left -= r;
         }
         return buf[buf_pos++];
     }
@@ -172,21 +196,16 @@ struct FboxRleReader {
 /** Open an FBOX file from SD, decode frame 0, and blit it into the LT7680 canvas slot. */
 void loadSketchFromSD(const char *path);
 
-/** Play all frames of an FBOX animation from the given source.
- *  Stops when the screen is touched. For single-frame files, behaves like
- *  loadSketchFromSD. */
+/** Play all frames of an FBOX v4 animation from the given source.
+ *  Stops when the screen is touched. Audio is interleaved per-frame and
+ *  streamed to I2S in real time — no caller-side audio handling. */
 PlaybackResult playFboxAnimation(FboxSource &src);
 
-/** Convenience wrapper: open path on SD and play. */
-PlaybackResult playFboxAnimationFromSD(const char *path);
-
-/** Convenience wrapper: open path on SD, wrap with a PSRAM ring buffer, and
- *  play. A background loader task pulls from SD into the ring while the
- *  decoder/consumer drain it. If the ring drains because content demand
- *  exceeds SD throughput, playback pauses momentarily until the ring refills.
- *  ring_bytes defaults to 2 MB. Use this for SD playback whenever PSRAM
- *  headroom allows. */
-PlaybackResult playFboxAnimationFromSDBuffered(const char *path,
-                                               uint32_t ring_bytes = 2u * 1024u * 1024u);
+/** Convenience wrapper: open path on SD, wrap with the PSRAM ring buffer, and
+ *  play. The ring loader pulls from SD into PSRAM while the producer/consumer
+ *  drain it. Single entry point — replaces the v3-era FromSDFull/Buffered split.
+ *  ring_bytes defaults to 2 MB. */
+PlaybackResult playFboxAnimationFromSD(const char *path,
+                                       uint32_t ring_bytes = 2u * 1024u * 1024u);
 
 #endif

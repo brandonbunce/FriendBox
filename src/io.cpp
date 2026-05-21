@@ -3,7 +3,10 @@
 #include "canvas.hpp"
 #include "ui_core.hpp"
 #include "audio.hpp"
+#include "audio_i2s.hpp"
 #include "fbox_source.hpp"
+
+#include <vector>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -102,17 +105,33 @@ void handleMenuButton(bool recheckInput)
     }
 }
 
-bool fboxReadHeader(FboxSource &src, FboxHeader &out, uint8_t *raw_out)
+bool fboxReadHeader(FboxSource &src, FboxHeader &out, uint32_t *crc_seed_out)
 {
-    uint8_t hdr[FBOX_HEADER_SIZE];
+    // Heap-allocated buffer: 512 bytes on the loopTask stack pushed it into
+    // the canary band when combined with the rest of playFboxAnimation's
+    // locals + a printf-driven vsnprintf frame downstream.
+    uint8_t *hdr = (uint8_t *)heap_caps_malloc(FBOX_HEADER_SIZE,
+                                               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!hdr) {
+        Serial.println("[FBOX] header buffer alloc failed");
+        return false;
+    }
+
     size_t got = 0;
     while (got < FBOX_HEADER_SIZE) {
         int r = src.read(hdr + got, FBOX_HEADER_SIZE - got);
-        if (r <= 0) return false;
+        if (r <= 0) { free(hdr); return false; }
         got += (size_t)r;
     }
-    if (memcmp(hdr, "FBOX", 4) != 0) return false;
-    if (hdr[4] != FBOX_VERSION_3) return false;
+    if (memcmp(hdr, "FBOX", 4) != 0) {
+        Serial.println("[FBOX] bad magic");
+        free(hdr); return false;
+    }
+    if (hdr[4] != FBOX_VERSION) {
+        Serial.printf("[FBOX] unsupported version %u (expected %u)\n",
+                      (unsigned)hdr[4], (unsigned)FBOX_VERSION);
+        free(hdr); return false;
+    }
 
     out.version     = hdr[4];
     out.kind        = hdr[5];
@@ -124,13 +143,43 @@ bool fboxReadHeader(FboxSource &src, FboxHeader &out, uint8_t *raw_out)
                     | ((uint32_t)hdr[16] << 16) | ((uint32_t)hdr[17] << 24);
     memcpy(out.username, &hdr[18], 32);
     out.username[32] = '\0';
-    out.audio_size  = (uint32_t)hdr[50] | ((uint32_t)hdr[51] << 8)
-                    | ((uint32_t)hdr[52] << 16) | ((uint32_t)hdr[53] << 24);
-    out.audio_sample_rate = (uint16_t)hdr[54] | ((uint16_t)hdr[55] << 8);
-    out.audio_channels    = hdr[56];
-    out.crc32 = (uint32_t)hdr[58] | ((uint32_t)hdr[59] << 8)
-              | ((uint32_t)hdr[60] << 16) | ((uint32_t)hdr[61] << 24);
-    if (raw_out) memcpy(raw_out, hdr, FBOX_HEADER_SIZE);
+    out.expected_file_size  = (uint32_t)hdr[50] | ((uint32_t)hdr[51] << 8)
+                            | ((uint32_t)hdr[52] << 16) | ((uint32_t)hdr[53] << 24);
+    out.audio_sample_rate   = (uint16_t)hdr[54] | ((uint16_t)hdr[55] << 8);
+    out.audio_channels      = hdr[56];
+    // hdr[57] reserved
+    out.audio_samples_per_frame = (uint16_t)hdr[58] | ((uint16_t)hdr[59] << 8);
+    out.crc32 = (uint32_t)hdr[60] | ((uint32_t)hdr[61] << 8)
+              | ((uint32_t)hdr[62] << 16) | ((uint32_t)hdr[63] << 24);
+    out.keyframe_count        = (uint16_t)hdr[64] | ((uint16_t)hdr[65] << 8);
+    out.keyframe_table_offset = (uint32_t)hdr[66] | ((uint32_t)hdr[67] << 8)
+                              | ((uint32_t)hdr[68] << 16) | ((uint32_t)hdr[69] << 24);
+    // hdr[70..71] reserved alignment
+    memcpy(out.description, &hdr[72], 256);
+    out.description[255] = '\0';
+
+    if (crc_seed_out) {
+        *crc_seed_out = esp_rom_crc32_le(0, hdr + 64, FBOX_HEADER_SIZE - 64);
+    }
+    free(hdr);
+
+    uint32_t src_size = src.size();
+    if (src_size != 0 && out.expected_file_size != 0 &&
+        src_size != out.expected_file_size)
+    {
+        Serial.printf("[FBOX] file-size mismatch: got %lu, header expects %lu\n",
+                      (unsigned long)src_size, (unsigned long)out.expected_file_size);
+        // Streaming sources report size=0; only fail if size is known.
+        return false;
+    }
+
+    if (out.audio_sample_rate > 0 && out.fps > 0) {
+        uint16_t expected = (uint16_t)(out.audio_sample_rate / out.fps);
+        if (out.audio_samples_per_frame != expected) {
+            Serial.printf("[FBOX] warn: audio_samples_per_frame=%u, expected %u from rate/fps\n",
+                          out.audio_samples_per_frame, expected);
+        }
+    }
     return true;
 }
 
@@ -162,6 +211,17 @@ void loadSketchFromSD(const char *path)
     if (src.read(&frame_type, 1) != 1 || frame_type != FBOX_FRAME_I) {
         Serial.println("loadSketchFromSD: frame 0 is not an I-frame");
         return;
+    }
+
+    // v4 per-frame layout: [type][audio block][video]. Skip the audio block
+    // for sketch import — audio doesn't apply to single-frame canvas loads.
+    if (hdr.audio_samples_per_frame > 0) {
+        uint32_t audio_bytes = 4u + ((uint32_t)hdr.audio_samples_per_frame + 1u) / 2u;
+        while (audio_bytes > 0) {
+            int r = src.read(skip_buf, audio_bytes > sizeof(skip_buf) ? sizeof(skip_buf) : audio_bytes);
+            if (r <= 0) { Serial.println("loadSketchFromSD: skip audio failed"); return; }
+            audio_bytes -= (uint32_t)r;
+        }
     }
 
     uint16_t pxLine[TFT_HOR_RES];
@@ -205,6 +265,7 @@ enum SlotState : uint8_t {
     SLOT_EOF    = 1,
     SLOT_ERR    = 2,
     SLOT_UNDER  = 3,
+    SLOT_SKIP   = 4,  // v4: 'S' frame — consumer reuses previous frame on LT7680
 };
 
 struct Slot {
@@ -443,6 +504,11 @@ static bool decodeFrameTokens(FboxRleReader &rle, bool is_pf,
     return true;
 }
 
+struct KeyframeEntry {
+    uint32_t frame_index;
+    uint32_t byte_offset;
+};
+
 struct ProducerCtx {
     FboxSource         *src;            // CRC-wrapped source
     const FboxHeader   *hdr;
@@ -455,14 +521,39 @@ struct ProducerCtx {
     volatile bool      *cancel;
     bool                ran_to_eof;
     TaskHandle_t        task;
+    // v4: per-frame chunk sizes (from frame_size_table). Read once before producer
+    // task starts. Owned by playFboxAnimation; producer reads only.
+    const uint32_t     *frame_sizes;
+    // v4: ADPCM block size derived from hdr->audio_samples_per_frame. 0 = no audio.
+    uint32_t            audio_block_bytes;
+    // v4: scratch buffers — kept off the producer task stack to avoid blowing
+    // the 16 KB budget. Owned by playFboxAnimation; producer uses but doesn't free.
+    uint8_t            *audio_block_scratch;   // audio_block_bytes (≤ ~470 bytes)
+    int16_t            *pcm_scratch;           // hdr->audio_samples_per_frame samples (≤ ~1.8 KB)
+    // v4: keyframe table parsed at file end (after last frame). 0 = no table.
+    std::vector<KeyframeEntry> *keyframes;
     // Profiling totals (µs)
     uint64_t            t_decode_us;    // per-pixel decode loop only
     uint64_t            t_msync_us;     // esp_cache_msync
     uint64_t            t_wait_free_us; // blocked on sem_free
     uint64_t            t_refill_us;    // src->read calls during decode (SD/HTTP/PSRAM)
+    uint64_t            t_adpcm_us;     // ADPCM block decode time
     uint32_t            n_refills;      // count of src->read calls
     uint32_t            n_frames;       // number of frames measured
+    uint32_t            n_skip_frames;  // count of 'S' frames seen
 };
+
+// Read exactly `n` bytes from src into dst. Returns true on full read.
+static bool readExact(FboxSource *src, uint8_t *dst, uint32_t n)
+{
+    uint32_t got = 0;
+    while (got < n) {
+        int r = src->read(dst + got, n - got);
+        if (r <= 0) return false;
+        got += (uint32_t)r;
+    }
+    return true;
+}
 
 void producerTask(void *param)
 {
@@ -471,10 +562,17 @@ void producerTask(void *param)
     bool error = false;
     uint8_t err_state = SLOT_ERR;
 
-    // Single persistent reader across all frames. Its 256-byte chunk buffer
-    // carries pre-read next-frame bytes from one iteration to the next.
+    // Persistent reader across video chunks. Bounded per-frame via
+    // beginFrame(video_budget) so it never consumes into the next frame's
+    // audio block. The buffer's pre-read still helps within a single video
+    // chunk for literal-heavy content.
     FboxRleReader rle;
     rle.begin(ctx->src, 0);
+
+    const uint32_t audio_bytes = ctx->audio_block_bytes;
+    const uint16_t samples_per_frame = ctx->hdr->audio_samples_per_frame;
+
+    ImaAdpcmDecoder dec;
 
     for (uint16_t fi = 0; fi < ctx->hdr->frame_count && !error; fi++) {
         if (*ctx->cancel) break;
@@ -489,24 +587,85 @@ void producerTask(void *param)
         s.frame_idx = fi;
         s.state     = SLOT_OK;
 
-        // Type byte comes from the chunk-buffered reader — using src->read
-        // directly here would bypass the buffer and lose any pre-read bytes
-        // sitting in rle.buf, re-introducing the offset drift the persistent
-        // reader is meant to prevent.
-        int type_int = rle.read_byte();
-        if (type_int < 0) { error = true; err_state = rle.err ? SLOT_UNDER : SLOT_ERR; }
-        uint8_t frame_type = (uint8_t)type_int;
+        // Determine this frame's total chunk size from the table.
+        uint32_t chunk_total = ctx->frame_sizes[fi];
+        if (chunk_total < 1 + audio_bytes) {
+            Serial.printf("[ANIM] frame %u chunk too small (%lu < %lu)\n",
+                          fi, (unsigned long)chunk_total,
+                          (unsigned long)(1 + audio_bytes));
+            error = true; err_state = SLOT_ERR;
+        }
 
+        // ── Read frame type byte ─────────────────────────────────────────
+        // Read via the rle reader's buffer because previous frame may have
+        // pre-read bytes into it (within its budget — but at frame boundary
+        // budget went to 0 so refills stopped; any remaining buf_pos<buf_fill
+        // bytes belong to THIS frame and must be consumed first).
+        int type_int = -1;
         if (!error) {
+            // Temporarily allow reader to drain any remaining buffered bytes
+            // by setting an unbounded budget for the read_byte call. Since
+            // the previous beginFrame budget should have been exact, this
+            // matters only for the very first frame.
+            rle.budget_left = -1;
+            type_int = rle.read_byte();
+            if (type_int < 0) { error = true; err_state = rle.err ? SLOT_UNDER : SLOT_ERR; }
+        }
+        uint8_t frame_type = error ? 0 : (uint8_t)type_int;
+
+        // ── Read & decode audio block ────────────────────────────────────
+        if (!error && audio_bytes > 0) {
+            // Audio bytes come direct from src (not the rle buffer) — we want
+            // them in a contiguous scratch for the ADPCM decoder. But any
+            // bytes already in rle.buf belong to THIS frame's chunk, so we
+            // must drain them first.
+            uint32_t got = 0;
+            // Drain from rle buffer first.
+            while (got < audio_bytes && rle.buf_pos < rle.buf_fill) {
+                ctx->audio_block_scratch[got++] = rle.buf[rle.buf_pos++];
+            }
+            // Then from src directly.
+            if (got < audio_bytes) {
+                if (!readExact(ctx->src, ctx->audio_block_scratch + got, audio_bytes - got)) {
+                    error = true; err_state = SLOT_UNDER;
+                }
+            }
+
+            if (!error) {
+                uint64_t t_a = esp_timer_get_time();
+                dec.resetFromBlockHeader(ctx->audio_block_scratch);
+                dec.decodeOneBlock(ctx->audio_block_scratch + 4,
+                                   ctx->pcm_scratch, samples_per_frame);
+                ctx->t_adpcm_us += esp_timer_get_time() - t_a;
+                pushI2SSamples(ctx->pcm_scratch, samples_per_frame);
+            }
+        }
+
+        // ── Video ─────────────────────────────────────────────────────────
+        uint32_t video_bytes = chunk_total - 1 - audio_bytes;
+
+        if (!error && frame_type == FBOX_FRAME_S) {
+            // Skip frame: no video bytes, consumer reuses previous slot.
+            if (video_bytes != 0) {
+                Serial.printf("[ANIM] frame %u: SKIP but video_bytes=%lu\n",
+                              fi, (unsigned long)video_bytes);
+            }
+            s.state = SLOT_SKIP;
+            ctx->n_skip_frames++;
+            // No msync needed; consumer doesn't read frame_buf for SKIP.
+        }
+        else if (!error && (frame_type == FBOX_FRAME_I || frame_type == FBOX_FRAME_P)) {
             bool is_pf  = (frame_type == FBOX_FRAME_P);
             uint8_t *fb = s.frame_buf;
             uint8_t *f4 = ctx->frame_4bpp;
 
-            // Reader keeps its chunk buffer; we still need to reset the
-            // per-frame token state in case a previous frame ended mid-token
-            // due to truncation (it shouldn't in well-formed files, but the
-            // reset is cheap and defensive).
-            rle.beginFrame((int)PIXEL_COUNT);
+            // Bound the reader to this frame's video budget. Count buffered
+            // bytes already in rle.buf (they came from src->read and belong
+            // to this frame's chunk).
+            int32_t in_buf = rle.buf_fill - rle.buf_pos;
+            int32_t still_on_src = (int32_t)video_bytes - in_buf;
+            if (still_on_src < 0) still_on_src = 0;
+            rle.beginFrame((int)PIXEL_COUNT, still_on_src);
 
             uint64_t rt_before = rle.refill_t_us;
             uint32_t rn_before = rle.refill_n;
@@ -522,7 +681,17 @@ void producerTask(void *param)
             if (!dec_ok) {
                 error     = true;
                 err_state = err_under ? SLOT_UNDER : SLOT_ERR;
+            } else {
+                // ESP32-S3 cache coherency — flush PSRAM cache lines so the
+                // consumer's SPI DMA on core 1 sees the just-written frame.
+                uint64_t t_msync_start = esp_timer_get_time();
+                esp_cache_msync(s.frame_buf, PIXEL_COUNT, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+                ctx->t_msync_us += esp_timer_get_time() - t_msync_start;
             }
+        }
+        else if (!error) {
+            Serial.printf("[ANIM] frame %u: unknown type 0x%02x\n", fi, frame_type);
+            error = true; err_state = SLOT_ERR;
         }
 
         if (error) {
@@ -533,29 +702,57 @@ void producerTask(void *param)
             goto producer_exit;
         }
 
-        // ESP32-S3 cache coherency: this task (core 0) wrote frame_buf via
-        // the PSRAM cache. The consumer (core 1) will trigger a DMA read of
-        // physical PSRAM that bypasses the cache. Without an explicit
-        // writeback the DMA sees stale memory and the displayed frame is a
-        // mosaic of new + old data. esp_cache_msync flushes cache lines to
-        // PSRAM. Direction C2M (CPU→memory) is the default, called out for
-        // clarity. Must complete before xSemaphoreGive so the consumer
-        // sees flushed data when it takes the slot.
-        uint64_t t_msync_start = esp_timer_get_time();
-        esp_cache_msync(s.frame_buf, PIXEL_COUNT, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-        ctx->t_msync_us += esp_timer_get_time() - t_msync_start;
-
         xSemaphoreGive(ctx->sem_ready);
         slot_idx = (slot_idx + 1) % RING_SLOTS;
 
         // Yield 1 tick per frame so IDLE0 can run and pet the task watchdog.
-        // Producer at priority 2 never naturally yields to priority-0 IDLE,
-        // and the decode loop is CPU-bound (no system calls between frames),
-        // so without this the WDT trips after 5 s of uninterrupted decoding.
         vTaskDelay(1);
     }
 
     if (!error && !*ctx->cancel) {
+        // Drain the trailing keyframe table through the source so its bytes
+        // flow through FboxSourceCrc and contribute to the file CRC32. Parse
+        // entries into ctx->keyframes — playback ignores the table for now,
+        // but future seek/scrub will use it.
+        if (ctx->hdr->keyframe_count > 0 && ctx->keyframes) {
+            ctx->keyframes->reserve(ctx->hdr->keyframe_count);
+            uint8_t entry[8];
+            uint8_t pending_n = 0;
+
+            auto consume_byte = [&](uint8_t b) {
+                entry[pending_n++] = b;
+                if (pending_n == 8) {
+                    KeyframeEntry e;
+                    e.frame_index = (uint32_t)entry[0] | ((uint32_t)entry[1] << 8)
+                                  | ((uint32_t)entry[2] << 16) | ((uint32_t)entry[3] << 24);
+                    e.byte_offset = (uint32_t)entry[4] | ((uint32_t)entry[5] << 8)
+                                  | ((uint32_t)entry[6] << 16) | ((uint32_t)entry[7] << 24);
+                    ctx->keyframes->push_back(e);
+                    pending_n = 0;
+                }
+            };
+
+            // Drain bytes still in rle.buf first (they came from src through
+            // crc_src so CRC is already accumulated).
+            while (rle.buf_pos < rle.buf_fill &&
+                   ctx->keyframes->size() < ctx->hdr->keyframe_count)
+            {
+                consume_byte(rle.buf[rle.buf_pos++]);
+            }
+            // Then pull the rest from src directly.
+            uint8_t scratch[64];
+            while (ctx->keyframes->size() < ctx->hdr->keyframe_count) {
+                uint32_t remaining = (ctx->hdr->keyframe_count - ctx->keyframes->size()) * 8u
+                                   - pending_n;
+                if (remaining == 0) break;
+                uint32_t want = remaining > sizeof(scratch) ? sizeof(scratch) : remaining;
+                if (!readExact(ctx->src, scratch, want)) break;
+                for (uint32_t i = 0; i < want; i++) consume_byte(scratch[i]);
+            }
+            Serial.printf("[ANIM] keyframes: %u entries parsed\n",
+                          (unsigned)ctx->keyframes->size());
+        }
+
         // Signal clean EOF
         if (xSemaphoreTake(ctx->sem_free, pdMS_TO_TICKS(500)) == pdTRUE) {
             ctx->slots[slot_idx].state = SLOT_EOF;
@@ -572,9 +769,9 @@ producer_exit:
 
 PlaybackResult playFboxAnimation(FboxSource &src)
 {
-    uint8_t raw_hdr[FBOX_HEADER_SIZE];
     FboxHeader hdr;
-    if (!fboxReadHeader(src, hdr, raw_hdr)) {
+    uint32_t crc_seed = 0;
+    if (!fboxReadHeader(src, hdr, &crc_seed)) {
         Serial.println("playFboxAnimation: invalid FBOX header");
         return PlaybackResult::DECODE_ERROR;
     }
@@ -583,24 +780,44 @@ PlaybackResult playFboxAnimation(FboxSource &src)
                       hdr.frame_count, hdr.width, hdr.height);
         return PlaybackResult::DECODE_ERROR;
     }
+    if (hdr.description[0]) Serial.printf("[ANIM] \"%s\"\n", hdr.description);
 
     const uint32_t frame_ms = hdr.fps > 0 ? 1000u / hdr.fps : 100u;
 
-    // CRC seed = header bytes [62..127] folded in. All later bytes go through
-    // FboxSourceCrc which accumulates as the producer reads.
-    uint32_t crc_seed = esp_rom_crc32_le(0, raw_hdr + 62, FBOX_HEADER_SIZE - 62);
+    // CRC seed (header bytes [64..511]) was computed by fboxReadHeader. All
+    // subsequent bytes go through FboxSourceCrc which accumulates as the
+    // producer reads.
     FboxSourceCrc crc_src(&src, crc_seed);
 
-    // Frame size table — read and discard payload; we don't need it for
-    // sequential playback. Folding it into CRC happens automatically via crc_src.
+    // Read frame size table into PSRAM — producer needs per-frame chunk sizes
+    // to compute video budget and detect chunk boundaries.
+    uint32_t *frame_sizes = (uint32_t *)ps_malloc(hdr.frame_count * 4u);
+    if (!frame_sizes) {
+        Serial.printf("[ANIM] frame_sizes ps_malloc (%lu B) failed\n",
+                      (unsigned long)(hdr.frame_count * 4u));
+        return PlaybackResult::OOM;
+    }
     {
-        uint32_t table_bytes = (uint32_t)hdr.frame_count * 4;
+        // Read raw LE u32s into a temp byte buffer, decode into frame_sizes.
+        // Done in 256-byte chunks; CRC accumulates automatically through crc_src.
         uint8_t buf[256];
-        while (table_bytes > 0) {
-            size_t take = table_bytes > sizeof(buf) ? sizeof(buf) : table_bytes;
+        uint32_t remaining = hdr.frame_count * 4u;
+        uint32_t out_idx   = 0;
+        uint8_t  pending[4]; uint8_t pending_n = 0;
+        while (remaining > 0) {
+            size_t take = remaining > sizeof(buf) ? sizeof(buf) : remaining;
             int r = crc_src.read(buf, take);
-            if (r <= 0) return PlaybackResult::READ_UNDERRUN;
-            table_bytes -= (uint32_t)r;
+            if (r <= 0) { free(frame_sizes); return PlaybackResult::READ_UNDERRUN; }
+            for (int i = 0; i < r; i++) {
+                pending[pending_n++] = buf[i];
+                if (pending_n == 4) {
+                    frame_sizes[out_idx++] =
+                        (uint32_t)pending[0] | ((uint32_t)pending[1] << 8) |
+                        ((uint32_t)pending[2] << 16) | ((uint32_t)pending[3] << 24);
+                    pending_n = 0;
+                }
+            }
+            remaining -= (uint32_t)r;
         }
     }
 
@@ -633,6 +850,7 @@ PlaybackResult playFboxAnimation(FboxSource &src)
     if (!frame_4bpp) {
         Serial.printf("[ANIM] internal alloc for frame_4bpp (%lu B) failed\n",
                       (unsigned long)(PIXEL_COUNT >> 1));
+        free(frame_sizes);
         return PlaybackResult::OOM;
     }
     Slot slots[RING_SLOTS] = {};
@@ -641,9 +859,33 @@ PlaybackResult playFboxAnimation(FboxSource &src)
         if (!slots[i].frame_buf) {
             for (int j = 0; j < i; j++) free(slots[j].frame_buf);
             free(frame_4bpp);
+            free(frame_sizes);
             return PlaybackResult::OOM;
         }
     }
+
+    // v4 audio scratches — kept off the producer task stack.
+    const uint32_t audio_block_bytes = (hdr.audio_samples_per_frame > 0)
+        ? (4u + ((uint32_t)hdr.audio_samples_per_frame + 1u) / 2u)
+        : 0u;
+    uint8_t  *audio_block_scratch = nullptr;
+    int16_t  *pcm_scratch         = nullptr;
+    if (audio_block_bytes > 0) {
+        audio_block_scratch = (uint8_t *)heap_caps_malloc(audio_block_bytes,
+                                                          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        pcm_scratch = (int16_t *)heap_caps_malloc(hdr.audio_samples_per_frame * sizeof(int16_t),
+                                                  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!audio_block_scratch || !pcm_scratch) {
+            Serial.println("[ANIM] audio scratch alloc failed");
+            if (audio_block_scratch) free(audio_block_scratch);
+            if (pcm_scratch) free(pcm_scratch);
+            for (int i = 0; i < RING_SLOTS; i++) free(slots[i].frame_buf);
+            free(frame_4bpp);
+            free(frame_sizes);
+            return PlaybackResult::OOM;
+        }
+    }
+    std::vector<KeyframeEntry> keyframes;
 
     SemaphoreHandle_t sem_free  = xSemaphoreCreateCounting(RING_SLOTS, RING_SLOTS);
     SemaphoreHandle_t sem_ready = xSemaphoreCreateCounting(RING_SLOTS, 0);
@@ -660,18 +902,41 @@ PlaybackResult playFboxAnimation(FboxSource &src)
     pctx.sem_ready   = sem_ready;
     pctx.cancel      = &cancel;
     pctx.ran_to_eof  = false;
+    pctx.frame_sizes = frame_sizes;
+    pctx.audio_block_bytes   = audio_block_bytes;
+    pctx.audio_block_scratch = audio_block_scratch;
+    pctx.pcm_scratch         = pcm_scratch;
+    pctx.keyframes   = &keyframes;
     pctx.t_decode_us = 0;
     pctx.t_msync_us  = 0;
     pctx.t_wait_free_us = 0;
     pctx.t_refill_us = 0;
+    pctx.t_adpcm_us  = 0;
     pctx.n_refills   = 0;
     pctx.n_frames    = 0;
+    pctx.n_skip_frames = 0;
 
-    // Stack 16 KB: the producer's FboxRleReader local (≈4 KB buf) + decode
-    // helpers + FreeRTOS overhead won't fit comfortably in the default 8 KB.
+    // v4 audio: init I2S streaming BEFORE spawning the producer so the
+    // producer's first pushI2SSamples lands in a valid stream buffer.
+    // Pre-buffer phase: producer fills ~12 frames of cushion in the stream
+    // buffer naturally — for the first few frames it pushes audio with no
+    // I2S consumer running yet (writer task spawned but DMA hasn't started
+    // draining audio until its first write). Audio start vs frame 0 is
+    // within the ~65 ms DMA cushion either way.
+    bool audio_streaming = false;
+    if (hdr.audio_sample_rate > 0 && hdr.audio_samples_per_frame > 0) {
+        audio_streaming = startI2SStreaming(hdr.audio_sample_rate,
+                                            hdr.audio_samples_per_frame);
+    }
+
+    // Stack 16 KB: producer's FboxRleReader local (≈4 KB buf) + decode helpers
+    // + ADPCM decoder + FreeRTOS overhead.
     xTaskCreatePinnedToCore(producerTask, "fbox_dec", 16384, &pctx, 2, &pctx.task, 0);
 
-    Serial.printf("[ANIM] play %u frames @ %u fps\n", hdr.frame_count, hdr.fps);
+    Serial.printf("[ANIM] play %u frames @ %u fps (audio=%s, samples/frame=%u)\n",
+                  hdr.frame_count, hdr.fps,
+                  audio_streaming ? "on" : "off",
+                  hdr.audio_samples_per_frame);
     uint32_t t_start     = millis();
     uint32_t t_spi_total = 0;
     uint32_t t_wait_total = 0;
@@ -714,12 +979,20 @@ PlaybackResult playFboxAnimation(FboxSource &src)
             break;
         }
 
-        uint32_t t_spi = millis();
-        displayAnimFrameBegin();
-        displayAnimWriteFrame(s.frame_buf);
-        displayAnimFrameEnd();
-        t_spi_total += millis() - t_spi;
-        frames_drawn++;
+        if (s.state == SLOT_SKIP) {
+            // Skip frame: LT7680 retains the previous frame on its own canvas
+            // (displayAnimWriteFrame is the only thing that mutates display
+            // memory). No SPI burst needed; we still pace and poll touch and
+            // count it as drawn so fps reporting is honest.
+            frames_drawn++;
+        } else {
+            uint32_t t_spi = millis();
+            displayAnimFrameBegin();
+            displayAnimWriteFrame(s.frame_buf);
+            displayAnimFrameEnd();
+            t_spi_total += millis() - t_spi;
+            frames_drawn++;
+        }
 
         xSemaphoreGive(sem_free);
         slot_idx = (slot_idx + 1) % RING_SLOTS;
@@ -734,10 +1007,7 @@ PlaybackResult playFboxAnimation(FboxSource &src)
             break;
         }
 
-        // Precise pacing: vTaskDelayUntil holds an absolute wake time so any
-        // per-iteration overshoot is absorbed instead of accumulated. The old
-        // do-while + vTaskDelay(2) loop overshot `until` by up to one tick per
-        // frame → ~1 ms/frame slip vs the 24 fps target.
+        // Precise pacing.
         vTaskDelayUntil(&prev_wake, pdMS_TO_TICKS(frame_ms));
     }
 
@@ -751,44 +1021,35 @@ PlaybackResult playFboxAnimation(FboxSource &src)
     }
 
     uint32_t elapsed_ms = millis() - t_start;
-    Serial.printf("[ANIM] done: drawn=%u/%u elapsed=%lums fps=%.1f spi_avg=%lums wait_avg=%lums\n",
+    Serial.printf("[ANIM] done: drawn=%u/%u elapsed=%lums fps=%.1f spi_avg=%lums wait_avg=%lums skips=%u\n",
                   frames_drawn, hdr.frame_count, (unsigned long)elapsed_ms,
                   elapsed_ms ? (frames_drawn * 1000.0f / elapsed_ms) : 0.0f,
                   frames_drawn ? (unsigned long)(t_spi_total / frames_drawn) : 0ul,
-                  frames_drawn ? (unsigned long)(t_wait_total / frames_drawn) : 0ul);
+                  frames_drawn ? (unsigned long)(t_wait_total / frames_drawn) : 0ul,
+                  pctx.n_skip_frames);
     if (pctx.n_frames) {
         uint64_t refill_total = pctx.t_refill_us;
-        Serial.printf("[ANIM] producer: decode_avg=%llums msync_avg=%lluus wait_free_avg=%lluus refill_avg=%lluus (n=%u)\n",
+        Serial.printf("[ANIM] producer: decode_avg=%llums msync_avg=%lluus wait_free_avg=%lluus refill_avg=%lluus adpcm_avg=%lluus (n=%u)\n",
                       pctx.t_decode_us  / pctx.n_frames / 1000,
                       pctx.t_msync_us   / pctx.n_frames,
                       pctx.t_wait_free_us / pctx.n_frames,
                       refill_total / pctx.n_frames,
+                      pctx.t_adpcm_us / pctx.n_frames,
                       pctx.n_frames);
         Serial.printf("[ANIM] producer: refills/frame=%.1f refill_us/call=%llu\n",
                       pctx.n_refills * 1.0f / pctx.n_frames,
                       pctx.n_refills ? (refill_total / pctx.n_refills) : 0);
     }
 
-    // Audio decode (buffer-only) — only valid if the producer reached EOF, since
-    // otherwise the source cursor isn't at the audio section.
-    FboxAudio audio = {};
-    bool audio_attempted = false;
-    if (pctx.ran_to_eof && hdr.audio_size > 0) {
-        // KNOWN LIMITATION: any bytes still buffered inside the producer's
-        // persistent FboxRleReader at video EOF are the first bytes of the
-        // audio section. Audio decode reads from crc_src directly, so those
-        // bytes are skipped → wrong predictor/step_index seed → decoded PCM
-        // is garbage. Fine for now because we have no I2S DAC hardware, but
-        // when audio playback lands we need a Buffered source shared by RLE
-        // and audio so the handoff is clean.
-        audio_attempted = true;
-        fboxDecodeAudio(crc_src, hdr, audio);
-    }
+    // Stop I2S streaming before freeing scratches the producer pushed from.
+    // Producer has already exited at this point (joined above), so no in-flight
+    // pushI2SSamples can race the teardown.
+    if (audio_streaming) stopI2SStreaming();
 
-    // CRC32 verification (header value 0 = skip)
-    if (hdr.crc32 != 0 && pctx.ran_to_eof &&
-        (hdr.audio_size == 0 || audio_attempted))
-    {
+    // CRC32 verification (header value 0 = skip). Producer naturally drained
+    // every byte (header → frame_table → frames → keyframe table) through crc_src,
+    // so the accumulator covers the whole file.
+    if (hdr.crc32 != 0 && pctx.ran_to_eof) {
         uint32_t got = crc_src.crc();
         if (got != hdr.crc32) {
             Serial.printf("[ANIM] CRC mismatch: got %08lx expected %08lx\n",
@@ -799,9 +1060,11 @@ PlaybackResult playFboxAnimation(FboxSource &src)
         }
     }
 
-    fboxAudioFree(audio);
     for (int i = 0; i < RING_SLOTS; i++) free(slots[i].frame_buf);
+    if (audio_block_scratch) free(audio_block_scratch);
+    if (pcm_scratch) free(pcm_scratch);
     free(frame_4bpp);
+    free(frame_sizes);
     vSemaphoreDelete(sem_free);
     vSemaphoreDelete(sem_ready);
 
@@ -809,26 +1072,16 @@ PlaybackResult playFboxAnimation(FboxSource &src)
     return result;
 }
 
-PlaybackResult playFboxAnimationFromSD(const char *path)
-{
-    FboxSourceSD src(path);
-    if (!src.ok()) {
-        Serial.printf("playFboxAnimationFromSD: cannot open %s\n", path);
-        return PlaybackResult::READ_UNDERRUN;
-    }
-    return playFboxAnimation(src);
-}
-
-PlaybackResult playFboxAnimationFromSDBuffered(const char *path, uint32_t ring_bytes)
+PlaybackResult playFboxAnimationFromSD(const char *path, uint32_t ring_bytes)
 {
     FboxSourceSD sd_src(path);
     if (!sd_src.ok()) {
-        Serial.printf("playFboxAnimationFromSDBuffered: cannot open %s\n", path);
+        Serial.printf("playFboxAnimationFromSD: cannot open %s\n", path);
         return PlaybackResult::READ_UNDERRUN;
     }
     FboxSourceRingBuffered buf_src(&sd_src, ring_bytes);
     if (!buf_src.ok()) {
-        Serial.println("playFboxAnimationFromSDBuffered: ring alloc failed, falling back to direct SD");
+        Serial.println("playFboxAnimationFromSD: ring alloc failed; using direct SD source");
         return playFboxAnimation(sd_src);
     }
     Serial.printf("[ANIM] ring buffer: %lu KB PSRAM, async SD loader on core 1\n",

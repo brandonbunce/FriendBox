@@ -55,24 +55,6 @@ private:
     uint32_t _size = 0;
 };
 
-class FboxSourcePSRAM : public FboxSource
-{
-public:
-    /* Takes ownership semantics: the caller keeps base alive for the lifetime
-     * of this source. The buffer should be in PSRAM but anywhere readable works. */
-    FboxSourcePSRAM(const uint8_t *base, uint32_t len)
-        : _base(base), _len(len), _cursor(0) {}
-
-    int      read(uint8_t *dst, size_t n) override;
-    bool     reset() override { _cursor = 0; return true; }
-    uint32_t size() const override { return _len; }
-
-private:
-    const uint8_t *_base;
-    uint32_t       _len;
-    uint32_t       _cursor;
-};
-
 /* Wraps another FboxSource and folds every byte read into a CRC32 accumulator.
  * Used by playFboxAnimation to verify the header's CRC across all bytes from
  * offset 62 onward (the header's pre-CRC tail is folded in by the caller before

@@ -91,6 +91,14 @@ void setup()
 {
   // cawkins was here
   Serial.begin(115200);
+  // I2S DAC pins held at a defined level pre-init: floating BCLK/LRCLK/DIN
+  // lets the DAC's input network oscillate, which drew transient current
+  // and corrupted PSRAM/RAM until the system crashed deep in unrelated code
+  // (IDLE0 WDT walks, loopTask canary, etc.). The I2S driver re-configures
+  // these in initI2S — these pinModes only matter before that point.
+  pinMode(38, OUTPUT); digitalWrite(38, LOW);
+  pinMode(39, OUTPUT); digitalWrite(39, LOW);
+  pinMode(40, OUTPUT); digitalWrite(40, LOW);
 #ifdef FRIENDBOX_DEBUG_MODE
   Serial.print("FriendBox ");
   Serial.print(FRIENDBOX_SOFTWARE_VERSION);
@@ -98,12 +106,12 @@ void setup()
 #endif
   initMenuButton();
   initFriendbox();
-  playSketchFromServer("1778969174678"); // Kitty Dithered 24fps
-  playFboxAnimationFromSDBuffered("/sketches/received/1778969174678.fbox"); // Kitty Dithered 24fps PSRAM
-  playSketchFromServer("1775852425606"); // J's Animation :)
-  playSketchFromServer("1776835153465"); // Ben Troll Physics 24fps
-  playSketchFromServer("1776836243916"); // Troll Physics 4 16fps
-  //playFboxAnimationFromSD("/sketches/received/1778392265348.fbox");
+  // v4: streamed playback with interleaved per-frame audio. Single code path
+  // for all sizes — no PSRAM-full constraint.
+  //playSketchFromServer("1778969174678"); // Kitty Dithered 24fps
+  //playSketchFromServer("1775852425606"); // J's Animation
+  //playSketchFromServer("1776835153465"); // Ben Troll Physics 24fps
+  //playSketchFromServer("1776836243916"); // Troll Physics 4 16fps
 }
  
 void loop()
