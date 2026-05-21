@@ -2,9 +2,9 @@
 #ifndef UI_CORE_HPP
 #define UI_CORE_HPP
 
-#include <Arduino.h>
+#include <stdint.h>
+#include <string>
 #include <vector>
-#include <Preferences.h>
 #include <LovyanGFX.h>
 
 

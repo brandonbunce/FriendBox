@@ -2,6 +2,7 @@
 #include "display.hpp"
 #include "canvas.hpp"
 #include "io.hpp"
+#include "idf_compat.hpp"
 
 static UIButton SCREEN_FILE_BROWSER_FILE_BUTTON[SCREEN_FILE_BROWSER_FILE_BUTTON_COUNT];
 static UIButton SCREEN_FILE_BROWSER_NAVI_BUTTON[SCREEN_FILE_BROWSER_NAVI_BUTTON_COUNT];

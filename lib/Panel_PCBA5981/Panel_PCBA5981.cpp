@@ -5,7 +5,7 @@
 
 #include "Panel_PCBA5981.hpp"
 
-#include <Arduino.h>
+#include "arduino_compat.h"
 
 #include <lgfx/v1/Bus.hpp>
 #include <lgfx/v1/platforms/common.hpp>

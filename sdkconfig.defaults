@@ -1,0 +1,95 @@
+# FriendBox sdkconfig defaults — pinned to the assumptions in
+# src/audio_i2s.cpp, src/io.cpp, src/fbox_source.cpp, and src/network.cpp.
+# PlatformIO/pioarduino picks this up automatically when framework = espidf.
+
+#
+# Target / CPU
+#
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240=y
+CONFIG_FREERTOS_HZ=1000
+
+#
+# PSRAM — N16R8 is 8 MB octal-mode PSRAM at 80 MHz.
+# Pin reservations on GPIO 26–37 are noted in
+# memory/project-octal-psram-pin-reservation.md.
+#
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+# Keep code + rodata in internal flash cache. Mapping them into PSRAM
+# (FETCH_INSTRUCTIONS / RODATA) shares the octal PSRAM bus with the frame
+# slots the SPI consumer is streaming — every burst arbitrates against
+# instruction fetches and the consumer's spi_avg/frame doubles.
+# Measured: 14.7 → 24+ fps on dithered content with these disabled.
+# CONFIG_SPIRAM_FETCH_INSTRUCTIONS is not set
+# CONFIG_SPIRAM_RODATA is not set
+
+# Bigger L1 caches help the consumer + decoder loops stay hot when the
+# PSRAM bus is busy with frame DMA. Cache LINE size stays at the 32B
+# default — bumping to 64B forces 64B alignment on every esp_cache_msync
+# target, and the per-frame slots in io.cpp are allocated 32B-aligned
+# (see memory/project-esp32s3-psram-dma-coherency.md).
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+# Pin line size to 32B — selecting DATA_CACHE_64KB silently flips the default
+# to LINE_64B, which breaks esp_cache_msync on every 32B-aligned playback slot.
+CONFIG_ESP32S3_DATA_CACHE_LINE_32B=y
+
+#
+# Flash — N16 = 16 MB
+#
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+#
+# Partition table — custom; see partitions.csv
+#
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+#
+# Main task — initFriendbox + UI handlers + the animation SPI consumer
+# all run here. 8 KB matches the stack the Arduino loopTask was giving
+# us; some LovyanGFX call paths are surprisingly deep. Pinning to CPU1
+# matches Arduino's loopTask placement: the FBOX producer is pinned to
+# core 0, and the consumer MUST be on the other core or they serialize
+# (observed: 14.7 fps when both on core 0 vs ~29 fps expected).
+#
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1=y
+
+#
+# FATFS for SDIO — LFN on heap so filenames > 12 chars work
+# (sketch IDs are 13+ digits).
+#
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+CONFIG_FATFS_USE_FASTSEEK=y
+
+#
+# HTTPS via mbedTLS certificate bundle — replaces
+# WiFiClientSecure::setInsecure() with proper CA validation.
+#
+CONFIG_ESP_TLS_USING_MBEDTLS=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
+#
+# HTTP client component
+#
+CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
+
+#
+# lwIP — give us enough sockets for download + future API calls
+#
+CONFIG_LWIP_MAX_SOCKETS=10
+
+#
+# Compiler
+#
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+CONFIG_COMPILER_CXX_RTTI=n

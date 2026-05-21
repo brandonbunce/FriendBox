@@ -1,11 +1,10 @@
 #ifndef NETWORK_HPP
 #define NETWORK_HPP
 
-#include <Arduino.h>
+#include <stdint.h>
+#include <string>
+#include <vector>
 #include <ArduinoJson.h>
-#include <HTTPClient.h>
-#include <WiFi.h>
-#include <WiFiClientSecure.h>
 
 #define LOCAL_HOSTNAME "friendbox"
 #define MAX_CONNECTION_ATTEMPTS 5

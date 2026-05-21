@@ -1,6 +1,10 @@
 #include "canvas.hpp"
 #include "display.hpp"
 #include "ui_core.hpp"
+#include "idf_compat.hpp"
+
+#include <algorithm>
+#include <cmath>
 
 uint16_t draw_color_palette[16] = {
     0x0000, // Black (0)
@@ -132,8 +136,8 @@ static void interpolateLine(int x0, int y0, int x1, int y1,
                             int radius, uint8_t colorIndex)
 {
     int dx = x1 - x0, dy = y1 - y0;
-    int step = max(1, radius / 2);
-    int nsteps = max(0, (int)(sqrtf(dx * dx + dy * dy) / step));
+    int step = std::max(1, radius / 2);
+    int nsteps = std::max(0, (int)(sqrtf(dx * dx + dy * dy) / step));
     for (int i = 0; i <= nsteps; i++)
     {
         float t = nsteps > 0 ? (float)i / nsteps : 0.0f;
@@ -145,8 +149,8 @@ static void interpolateLine(int x0, int y0, int x1, int y1,
 static void interpolateRainbow(int x0, int y0, int x1, int y1, int radius)
 {
     int dx = x1 - x0, dy = y1 - y0;
-    int step = max(1, radius / 2);
-    int nsteps = max(0, (int)(sqrtf(dx * dx + dy * dy) / step));
+    int step = std::max(1, radius / 2);
+    int nsteps = std::max(0, (int)(sqrtf(dx * dx + dy * dy) / step));
     for (int i = 0; i <= nsteps; i++)
     {
         float t = nsteps > 0 ? (float)i / nsteps : 0.0f;

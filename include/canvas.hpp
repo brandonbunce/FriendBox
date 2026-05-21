@@ -1,9 +1,7 @@
 #ifndef CANVAS_HPP
 #define CANVAS_HPP
 
-#include <Arduino.h>
-#include <SD_MMC.h>
-#include <Preferences.h>
+#include <stdint.h>
 
 /** Defines color palette for our 4-bit color frame buffer.
  *

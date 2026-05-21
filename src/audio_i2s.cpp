@@ -23,7 +23,7 @@ static bool installChannel(uint32_t sample_rate)
 
     esp_err_t err = i2s_new_channel(&chan_cfg, &s_tx_chan, nullptr);
     if (err != ESP_OK) {
-        Serial.printf("[I2S] i2s_new_channel err=%d\n", err);
+        printf("[I2S] i2s_new_channel err=%d\n", err);
         s_tx_chan = nullptr;
         return false;
     }
@@ -44,7 +44,7 @@ static bool installChannel(uint32_t sample_rate)
 
     err = i2s_channel_init_std_mode(s_tx_chan, &std_cfg);
     if (err != ESP_OK) {
-        Serial.printf("[I2S] init_std_mode err=%d\n", err);
+        printf("[I2S] init_std_mode err=%d\n", err);
         i2s_del_channel(s_tx_chan);
         s_tx_chan = nullptr;
         return false;
@@ -52,13 +52,13 @@ static bool installChannel(uint32_t sample_rate)
 
     err = i2s_channel_enable(s_tx_chan);
     if (err != ESP_OK) {
-        Serial.printf("[I2S] enable err=%d\n", err);
+        printf("[I2S] enable err=%d\n", err);
         i2s_del_channel(s_tx_chan);
         s_tx_chan = nullptr;
         return false;
     }
 
-    Serial.printf("[I2S] channel up @ %lu Hz (BCLK=%d LRCLK=%d DOUT=%d)\n",
+    printf("[I2S] channel up @ %lu Hz (BCLK=%d LRCLK=%d DOUT=%d)\n",
                   (unsigned long)sample_rate, I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
     return true;
 }
@@ -90,7 +90,7 @@ static void writerTask(void *)
                                           got_samples * 2 * sizeof(int16_t),
                                           &written, pdMS_TO_TICKS(500));
         if (err != ESP_OK) {
-            Serial.printf("[I2S] write err=%d\n", err);
+            printf("[I2S] write err=%d\n", err);
             break;
         }
     }
@@ -102,7 +102,7 @@ bool startI2SStreaming(uint32_t sample_rate, uint16_t samples_per_frame)
 {
     if (sample_rate == 0 || samples_per_frame == 0) return false;
     if (s_tx_chan) {
-        Serial.println("[I2S] startI2SStreaming: already running");
+        puts("[I2S] startI2SStreaming: already running");
         return false;
     }
     if (!installChannel(sample_rate)) return false;
@@ -113,7 +113,7 @@ bool startI2SStreaming(uint32_t sample_rate, uint16_t samples_per_frame)
     uint32_t buf_bytes = (uint32_t)samples_per_frame * 12u * 2u + 1u;
     s_stream_storage = (uint8_t *)heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM);
     if (!s_stream_storage) {
-        Serial.printf("[I2S] stream storage ps_malloc %lu failed\n",
+        printf("[I2S] stream storage ps_malloc %lu failed\n",
                       (unsigned long)buf_bytes);
         i2s_channel_disable(s_tx_chan);
         i2s_del_channel(s_tx_chan);
@@ -128,7 +128,7 @@ bool startI2SStreaming(uint32_t sample_rate, uint16_t samples_per_frame)
         i2s_channel_disable(s_tx_chan);
         i2s_del_channel(s_tx_chan);
         s_tx_chan = nullptr;
-        Serial.println("[I2S] xStreamBufferCreateStatic failed");
+        puts("[I2S] xStreamBufferCreateStatic failed");
         return false;
     }
 
@@ -144,7 +144,7 @@ bool startI2SStreaming(uint32_t sample_rate, uint16_t samples_per_frame)
     BaseType_t ok = xTaskCreatePinnedToCore(writerTask, "i2s_wr", 8192, nullptr,
                                             3, &s_writer_task, 1);
     if (ok != pdPASS) {
-        Serial.println("[I2S] writer task spawn failed");
+        puts("[I2S] writer task spawn failed");
         vStreamBufferDelete(s_stream); s_stream = nullptr;
         free(s_stream_storage); s_stream_storage = nullptr;
         i2s_channel_disable(s_tx_chan);
@@ -165,7 +165,7 @@ bool pushI2SSamples(const int16_t *pcm, uint32_t n_samples)
     if (sent < bytes) {
         s_drops++;
         if ((s_drops & 0x1F) == 1) {
-            Serial.printf("[I2S] push timeout (%u/%u bytes, drops=%u)\n",
+            printf("[I2S] push timeout (%u/%u bytes, drops=%u)\n",
                           (unsigned)sent, (unsigned)bytes, s_drops);
         }
         return false;
@@ -184,7 +184,7 @@ void stopI2SStreaming()
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     if (!s_writer_done) {
-        Serial.println("[I2S] writer task did not exit within 500 ms");
+        puts("[I2S] writer task did not exit within 500 ms");
     }
     s_writer_task = nullptr;
 
@@ -196,6 +196,6 @@ void stopI2SStreaming()
         s_tx_chan = nullptr;
     }
     if (s_drops > 0) {
-        Serial.printf("[I2S] total push drops: %u\n", s_drops);
+        printf("[I2S] total push drops: %u\n", s_drops);
     }
 }

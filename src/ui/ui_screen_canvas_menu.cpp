@@ -2,6 +2,8 @@
 #include "display.hpp"
 #include "canvas.hpp"
 #include "io.hpp"
+#include "idf_compat.hpp"
+#include <esp_system.h>
 
 static UIButton SCREEN_CANVAS_MENU_ACTION_BUTTON[SCREEN_CANVAS_UI_ACTION_BUTTON_COUNT];
 static const char *SCREEN_CANVAS_MENU_ACTION_BUTTON_LABEL[SCREEN_CANVAS_UI_ACTION_BUTTON_COUNT] = {"Menu", "Tools", "Save", "Load"};

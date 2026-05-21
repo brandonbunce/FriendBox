@@ -1,7 +1,7 @@
 #ifndef AUDIO_HPP
 #define AUDIO_HPP
 
-#include <Arduino.h>
+#include <stdint.h>
 
 /* IMA ADPCM block decoder. One block = 4-byte header + ceil(samples/2) nibble
  * payload bytes. Each block re-seeds state from its header, so blocks decode

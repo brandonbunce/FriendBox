@@ -1,9 +1,9 @@
 #ifndef DISPLAY_HPP
 #define DISPLAY_HPP
 
-#include <Arduino.h>
+#include <stdint.h>
 #include <LovyanGFX.h>
-#include <LGFX_ESP32_PCBA5981_GT911.hpp>
+#include "LGFX_ESP32_PCBA5981_GT911.hpp"
 
 #define TFT_HOR_RES 480
 #define TFT_VER_RES 480

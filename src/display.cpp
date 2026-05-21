@@ -1,10 +1,11 @@
 #include "display.hpp"
 #include "canvas.hpp"
+#include "idf_compat.hpp"
 #include <Panel_PCBA5981.hpp>
 
 LGFX tft;
 uint16_t touchX, touchY, touchZ;
-u_int16_t lastTouchX, lastTouchY;
+uint16_t lastTouchX, lastTouchY;
 static unsigned long lastTouchTime = 0;
 
 bool initDisplay()

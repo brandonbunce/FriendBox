@@ -1,7 +1,7 @@
 #ifndef AUDIO_I2S_HPP
 #define AUDIO_I2S_HPP
 
-#include <Arduino.h>
+#include <stdint.h>
 
 // PCBA5981 I2S DAC wiring
 #define I2S_BCLK_PIN  38

@@ -5,9 +5,17 @@
 #include "audio.hpp"
 #include "audio_i2s.hpp"
 #include "fbox_source.hpp"
+#include "idf_compat.hpp"
 
 #include <vector>
+#include <string>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <stdio.h>
 
+#include <driver/gpio.h>
+#include <driver/sdmmc_host.h>
+#include <esp_vfs_fat.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
@@ -16,11 +24,14 @@
 #include <esp_cache.h>
 #include <esp_timer.h>
 
-Preferences nvs;
+NvsStore nvs;
+static sdmmc_card_t *s_sd_card = nullptr;
 
 
 bool initNVS()
 {
+  // nvs_flash_init() already ran in app_main; this just sanity-opens the
+  // namespace to confirm the "Friendbox" key store exists.
   nvs.begin("Friendbox", true);
   nvs.end();
   return true;
@@ -29,41 +40,63 @@ bool initNVS()
 bool initSD(bool forceFormat)
 {
 #ifdef FRIENDBOX_DEBUG_MODE
-    Serial.println("INFO: Initializing SD (SDIO 4-bit)...");
+    puts("INFO: Initializing SD (SDIO 4-bit)...");
 #endif
-    // SDIO 4-bit mode at 40 MHz. ~10 MB/s effective vs ~1.3 MB/s on the
-    // previous SD-over-SPI path. setPins must be called before begin.
-    if (!SD_MMC.setPins(SD_CLK, SD_CMD, SD_DAT0, SD_DAT1, SD_DAT2, SD_DAT3)) {
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.flags        = SDMMC_HOST_FLAG_4BIT;
+    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
+    host.slot         = SDMMC_HOST_SLOT_1;
+
+    sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
+    slot.clk   = (gpio_num_t)SD_CLK;
+    slot.cmd   = (gpio_num_t)SD_CMD;
+    slot.d0    = (gpio_num_t)SD_DAT0;
+    slot.d1    = (gpio_num_t)SD_DAT1;
+    slot.d2    = (gpio_num_t)SD_DAT2;
+    slot.d3    = (gpio_num_t)SD_DAT3;
+    slot.width = 4;
+    slot.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+
+    esp_vfs_fat_sdmmc_mount_config_t mount_cfg = {
+        .format_if_mount_failed = forceFormat,
+        .max_files              = 5,
+        .allocation_unit_size   = 16 * 1024,
+        .disk_status_check_enable = false,
+        .use_one_fat = false,
+    };
+
+    // Mount at "/sd" so paths like "/sd/sketches/received/..." keep working;
+    // FatFS drive number "0:" is what the raw FATFS callers in fbox_source.cpp
+    // expect (esp_vfs_fat_sdmmc_mount registers it as drive 0 by default).
+    esp_err_t err = esp_vfs_fat_sdmmc_mount("/sd", &host, &slot, &mount_cfg, &s_sd_card);
+    if (err != ESP_OK) {
 #ifdef FRIENDBOX_DEBUG_MODE
-        Serial.println("ERROR: SD_MMC.setPins failed");
+        printf("ERROR: esp_vfs_fat_sdmmc_mount failed: 0x%x\n", err);
 #endif
+        s_sd_card = nullptr;
         return false;
     }
-    // mode1bit=false → 4-bit. format_if_mount_failed=false. Frequency
-    // SDMMC_FREQ_HIGHSPEED = 40 MHz. mountpoint "/sd" matches the historical
-    // path layout (e.g. "/sketches/received/...").
-    if (!SD_MMC.begin("/sd", /*mode1bit=*/false, /*format_if_mount_failed=*/false,
-                      SDMMC_FREQ_HIGHSPEED, /*maxOpenFiles=*/5)) {
 #ifdef FRIENDBOX_DEBUG_MODE
-        Serial.println("ERROR: SD_MMC.begin failed");
-#endif
-        return false;
+    if (s_sd_card) {
+        uint64_t size_mb = ((uint64_t)s_sd_card->csd.capacity *
+                            (uint64_t)s_sd_card->csd.sector_size) / (1024ULL * 1024ULL);
+        printf("INFO: SD ready — type=%s size=%lluMB freq=%dkHz\n",
+               (s_sd_card->is_mmc ? "MMC" : (s_sd_card->ocr & (1 << 30) ? "SDHC" : "SDSC")),
+               (unsigned long long)size_mb,
+               s_sd_card->max_freq_khz);
     }
-#ifdef FRIENDBOX_DEBUG_MODE
-    sdcard_type_t ct = SD_MMC.cardType();
-    const char *type_s = (ct == CARD_NONE)  ? "NONE"
-                       : (ct == CARD_MMC)   ? "MMC"
-                       : (ct == CARD_SD)    ? "SDSC"
-                       : (ct == CARD_SDHC)  ? "SDHC"
-                                            : "UNKNOWN";
-    Serial.printf("INFO: SD_MMC ready — type=%s size=%lluMB freq=%dkHz\n",
-                  type_s, SD_MMC.cardSize() / (1024 * 1024), SDMMC_FREQ_HIGHSPEED);
 #endif
     return true;
 }
 
 bool initMenuButton() {
-    pinMode(HALL_SENSOR_PIN, INPUT_PULLUP);
+    gpio_config_t io = {};
+    io.pin_bit_mask = 1ULL << (uint32_t)HALL_SENSOR_PIN;
+    io.mode         = GPIO_MODE_INPUT;
+    io.pull_up_en   = GPIO_PULLUP_ENABLE;
+    io.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io.intr_type    = GPIO_INTR_DISABLE;
+    gpio_config(&io);
     return true;
 }
 
@@ -74,7 +107,7 @@ void handleMenuButton(bool recheckInput)
         static unsigned long lastPress = 0;
         static unsigned int lastButtonState = 0;
         static bool alreadyPressed = false;
-        if (digitalRead(HALL_SENSOR_PIN) == LOW) /*Button Pressed*/
+        if (gpio_get_level((gpio_num_t)HALL_SENSOR_PIN) == 0) /*Button Pressed*/
         {
             if (lastPress == 0)
             {
@@ -791,7 +824,7 @@ PlaybackResult playFboxAnimation(FboxSource &src)
 
     // Read frame size table into PSRAM — producer needs per-frame chunk sizes
     // to compute video budget and detect chunk boundaries.
-    uint32_t *frame_sizes = (uint32_t *)ps_malloc(hdr.frame_count * 4u);
+    uint32_t *frame_sizes = (uint32_t *)heap_caps_malloc(hdr.frame_count * 4u, MALLOC_CAP_SPIRAM);
     if (!frame_sizes) {
         Serial.printf("[ANIM] frame_sizes ps_malloc (%lu B) failed\n",
                       (unsigned long)(hdr.frame_count * 4u));
@@ -855,7 +888,13 @@ PlaybackResult playFboxAnimation(FboxSource &src)
     }
     Slot slots[RING_SLOTS] = {};
     for (int i = 0; i < RING_SLOTS; i++) {
-        slots[i].frame_buf = (uint8_t *)heap_caps_aligned_alloc(32, PIXEL_COUNT, MALLOC_CAP_SPIRAM);
+        // MALLOC_CAP_DMA is required for the SPI2 driver to read the slot
+        // directly via DMA. Without it, IDF 5.x's spi_master falls back to
+        // bouncing the buffer through internal RAM in chunks — adds ~11ms
+        // per 230 KB frame, the gap between theoretical (23ms @ 80 MHz)
+        // and the observed 34ms spi_avg.
+        slots[i].frame_buf = (uint8_t *)heap_caps_aligned_alloc(
+            32, PIXEL_COUNT, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
         if (!slots[i].frame_buf) {
             for (int j = 0; j < i; j++) free(slots[j].frame_buf);
             free(frame_4bpp);
@@ -1095,20 +1134,15 @@ PlaybackResult playFboxAnimationFromSD(const char *path, uint32_t ring_bytes)
 std::vector<std::string> sdGetFboxFiles()
 {
     std::vector<std::string> fileNames;
-    File root = SD_MMC.open("/sketches/saved");
-    if (root)
-    {
-        File entry;
-        while (entry = root.openNextFile())
-        {
-            if (!entry.isDirectory())
-            {
-                Serial.println("Found file: " + String(entry.name()));
-                fileNames.push_back(entry.name());
-            }
-            entry.close();
+    DIR *dir = opendir("/sd/sketches/saved");
+    if (!dir) return fileNames;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (entry->d_type == DT_REG) {
+            printf("Found file: %s\n", entry->d_name);
+            fileNames.emplace_back(entry->d_name);
         }
-        root.close();
     }
+    closedir(dir);
     return fileNames;
 }

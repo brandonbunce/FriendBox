@@ -6,6 +6,7 @@
 #include "canvas.hpp"
 #include "io.hpp"
 #include "network.hpp"
+#include "idf_compat.hpp"
 
 std::vector<UIButton *> uiButtons;
 UIButton *lastPressedButton;

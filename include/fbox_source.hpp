@@ -1,10 +1,11 @@
 #ifndef FBOX_SOURCE_HPP
 #define FBOX_SOURCE_HPP
 
-#include <Arduino.h>
-#include <SD_MMC.h>
-#include <HTTPClient.h>
-#include <WiFi.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <string>
+
+#include <esp_http_client.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/stream_buffer.h>
@@ -133,15 +134,15 @@ public:
     bool     reset() override;
     uint32_t size() const override { return _size; }
 
-    bool ok() const { return _stream != nullptr; }
+    bool ok() const { return _client != nullptr; }
 
 private:
     bool _open();
     void _close();
 
-    HTTPClient *_http   = nullptr;
-    WiFiClient *_stream = nullptr;
-    String      _url;
+    esp_http_client_handle_t _client = nullptr;
+    bool        _headers_fetched = false;
+    std::string _url;
     uint32_t    _size           = 0;
     uint32_t    _read_timeout_ms;
 };

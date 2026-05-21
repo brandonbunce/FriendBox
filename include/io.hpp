@@ -1,11 +1,12 @@
 #ifndef IO_H
 #define IO_H
 
-#include <Arduino.h>
-#include <SD_MMC.h>
-#include <Preferences.h>
+#include <stdint.h>
+#include <vector>
+#include <string>
 #include <esp_timer.h>
 #include "fbox_source.hpp"
+#include "nvs_store.hpp"
 
 // SDIO 4-bit pinout (replaces the previous SPI-mode wiring).
 // Effective bandwidth ~10 MB/s vs ~1.3 MB/s on SPI — see
@@ -17,7 +18,7 @@
 #define SD_CLK 13
 #define SD_CMD 2
 
-extern Preferences nvs;
+extern NvsStore nvs;
 
 // Input (Buttons)
 /** Which GPIO pin will be used as input for the hall effect button? */
