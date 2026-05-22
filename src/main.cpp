@@ -136,7 +136,7 @@ extern "C" void app_main(void)
     // v4: streamed playback with interleaved per-frame audio. Single code path
     // for all sizes — no PSRAM-full constraint.
     playSketchFromServer("1778969174678"); // Kitty Dithered 24fps
-    //playSketchFromServer("1775852425606"); // J's Animation
+    playSketchFromServer("1776836243916"); // Dithering Glitch Test
     playSketchFromServer("1776835153465"); // Ben Troll Physics 24fps
     //playSketchFromServer("1776836243916"); // Troll Physics 4 16fps
 

@@ -147,7 +147,39 @@ int FboxSourceRingBuffered::read(uint8_t *dst, size_t n)
 
 bool FboxSourceRingBuffered::reset()
 {
-    return false;
+    if (!_stream || !_inner) return false;
+
+    // Stop the current loader and wait for it to exit. Mirrors the dtor's
+    // sequence: flag stop, unblock any in-flight xStreamBufferSend with a
+    // reset, then poll _loader_done.
+    _stop = true;
+    if (_loader_task) {
+        xStreamBufferReset(_stream);
+        for (int i = 0; i < 400 && !_loader_done; i++) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+        if (!_loader_done) {
+            puts("[FBOX-RING] reset: loader did not exit within 2s");
+            return false;
+        }
+    }
+
+    // Discard whatever the loader left in the ring, rewind the inner source.
+    xStreamBufferReset(_stream);
+    if (!_inner->reset()) return false;
+
+    // Fresh flags + new loader task. Stall counters persist across resets so
+    // looped-playback stats stay cumulative.
+    _stop        = false;
+    _eof         = false;
+    _loader_done = false;
+    BaseType_t ok = xTaskCreatePinnedToCore(loaderTrampoline, "fbox_ld",
+                                            8192, this, 2, &_loader_task, 1);
+    if (ok != pdPASS) {
+        puts("[FBOX-RING] reset: loader task spawn failed");
+        return false;
+    }
+    return true;
 }
 
 // ── FboxSourceCrc ───────────────────────────────────────────────────────────

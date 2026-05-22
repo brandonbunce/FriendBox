@@ -127,6 +127,38 @@ ESP32-S3 supports SDIO. SD_MMC at 40 MHz in 4-bit mode delivers ~10 MB/s effecti
 
 ---
 
+## [LOW] ST7701S init bus cannot be shared with the LT7680 SPI bus
+
+**Files:** [include/LGFX_ESP32_PCBA5981_GT911.hpp](../../include/LGFX_ESP32_PCBA5981_GT911.hpp), [lib/Panel_PCBA5981/Panel_PCBA5981.cpp](../../lib/Panel_PCBA5981/Panel_PCBA5981.cpp)
+
+**Context:** The ST7701S panel config is bit-banged on dedicated GPIOs 9/11/10 (CS/CLK/DIN). The LT7680 host SPI bus uses GPIOs 4/7/6/5 (CS/SCLK/MOSI/MISO). These are two physically separate buses on the BuyDisplay ER-TFT040-3 FFC, routed to different ESP32 pads on the PCBA5981. Sharing CLK/DIN between the two chips would free GPIOs 11 and 10 for other use.
+
+**What was tried:**
+
+1. Hardware rework: cut the original GPIO 11 → LCD_CLK and GPIO 10 → LCD_DIN traces and patched so that GPIO 7 drives both the LT7680 SCL pad and the ST7701S CLK pad (and GPIO 6 drives both LT7680 SDI and ST7701S DIN). GPIO 9 stays as the dedicated ST7701S CS, GPIO 4 stays as the dedicated LT7680 CS.
+2. Firmware refactor in `Panel_PCBA5981::init`: inlined `Panel_Device::init` so the ST7701S bit-bang happens *before* `_bus->init()` claims the SPI peripheral on pins 7/6. This guarantees the bit-bang sees pristine GPIO. Both LT7680 CS and ST7701S CS are correctly gated so the chips deselect each other during their respective transfers. This refactor is still in the tree — it's a clean change that works in both pin configs.
+
+**Result:** Panel stays black with shared pins. Boot log diagnostic:
+
+```
+Shared pins:                          Dedicated pins:
+[PANEL] Initial STSR=0xC1             [PANEL] Initial STSR=0x55
+[PANEL] Normal-op OK STSR=0xA0        [PANEL] Normal-op OK STSR=0x55
+[PANEL] _wait_sdram_ready TIMEOUT     [PANEL] SDRAM ready (status=0x55, 0ms)
+```
+
+`0x55` is the LT7680's expected normal-op value; `0xC1`/`0xA0` are corrupted but non-random reads — almost certainly the LT7680 receiving a garbled register-address on the shared SCLK/MOSI lines and returning the contents of a *different* register over the (still clean, dedicated) SDO pin. Dropping `freq_write`/`freq_read` to 10 MHz did not recover (1 MHz not tested). The most likely root cause is signal integrity on the now-stubbed trace — the rerouted segment turns each clock/data line into a T-topology with two pad loads plus an unterminated stub.
+
+**Why deferred:**
+
+- The board already works fine on dedicated 9/11/10.
+- GPIOs 11 and 10 are not currently load-bearing for any planned feature.
+- Making sharing work would require either a board re-spin with proper terminated routing, or a much lower SPI clock — and 80 MHz `freq_write` is the LT7680-side ceiling that the 24 fps animation pipeline budget depends on ([above](#high-sd-bandwidth-in-spi-mode-caps-complex-animations-below-24-fps--plan-to-migrate-to-sd_mmc-4-bit)). Lower SPI = no 24 fps.
+
+**If revisited:** test at 1 MHz to confirm the failure mode is purely SI (vs. e.g. a bad bridge joint); a multimeter continuity check from GPIO 7 → LCD_CLK pad would rule out the trivial hardware-fault explanation before any further firmware work. If SI is confirmed, a board re-spin with proper bus routing (or a 33–50 Ω series termination at the stub) is the only realistic path forward.
+
+---
+
 ## [HIGH] Friend-to-friend send/receive not implemented
 
 **File:** [src/network.cpp](../../src/network.cpp)

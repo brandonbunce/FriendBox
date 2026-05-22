@@ -13,10 +13,10 @@
 // docs/exec-plans/tech-debt-tracker.md and project-sd-spi-bandwidth-wall.
 #define SD_DAT0 48
 #define SD_DAT1 47
-#define SD_DAT2 1
+#define SD_DAT2 2
 #define SD_DAT3 14
 #define SD_CLK 13
-#define SD_CMD 2
+#define SD_CMD 1
 
 extern NvsStore nvs;
 

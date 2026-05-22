@@ -632,7 +632,27 @@ void Panel_PCBA5981::_st7701s_init_sequence(void)
 
 bool Panel_PCBA5981::init(bool use_reset)
 {
-    if (!Panel_Device::init(use_reset)) return false;
+    // Inlined Panel_Device::init() so we can bit-bang the ST7701S panel
+    // config bus while pins 7/6 are still pristine GPIO. On the PCBA5981
+    // those pins double as the LT7680 SPI bus (LCM_SCL/LCM_SDI bridged to
+    // LCD_CLK/LCD_DIN at the panel), so once _bus->init() claims them for
+    // the SPI peripheral the bit-bang can no longer drive the trace.
+    init_rst();
+    init_cs();
+    if (use_reset)
+    {
+        rst_control(false);
+        delay(8);
+        rst_control(true);
+        delay(64);
+    }
+
+    if (st7701s_pins.pin_cs >= 0 && st7701s_pins.pin_clk >= 0 && st7701s_pins.pin_din >= 0)
+    {
+        _st7701s_init_sequence();
+    }
+
+    _bus->init();
 
     startWrite(true);
 
@@ -749,18 +769,9 @@ bool Panel_PCBA5981::init(bool use_reset)
     _win_ye = (uint16_t)(timing.v_display - 1);
     _set_active_window(0, 0, timing.h_display, timing.v_display);
 
-    endWrite();
-
-    // ---- ST7701S panel init via shared SPI pins ----
-    if (st7701s_pins.pin_cs >= 0 && st7701s_pins.pin_clk >= 0 && st7701s_pins.pin_din >= 0)
-    {
-        _bus->release();
-        _st7701s_init_sequence();
-        _bus->init();
-    }
-
     // ---- LT7680 Display ON ----
-    startWrite(true);
+    // (ST7701S was already initialised before _bus->init() at the top of
+    // this function — see the inlined Panel_Device::init() above.)
     {
         uint8_t dpcr = 0x40;                  // bit6 = display ON
         if (timing.pclk_rising) dpcr |= 0x80;

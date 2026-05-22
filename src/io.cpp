@@ -416,8 +416,16 @@ static bool decodeFrameTokens(FboxRleReader &rle, bool is_pf,
             // CLUT lookup with NO nibble masking. ~3–4× faster than scalar.
             uint32_t remaining = count;
 
-            // Leading half-byte: if i is odd, consume the high nibble of one
-            // source byte to realign, then the low nibble (now at even i).
+            // Leading half-byte: if i is odd, consume one source byte for two
+            // pixels — HIGH nibble lands on the odd-i pixel (LOW nib of
+            // f4[i>>1]), LOW nibble on the following even-i pixel (HIGH nib of
+            // f4[(i+1)>>1]). i advances by 2 and STAYS ODD; the bulk-tail and
+            // trailing-single below have odd-i variants for that reason. (An
+            // earlier version of this comment claimed it "realigns" to even.
+            // It doesn't — and the bulk/trailing fast paths used to silently
+            // misaddress f4 nibbles when reached at odd i, corrupting one
+            // adjacent pixel per source byte. That manifested as accumulating
+            // noise on dithered P-frame content between I-frame resets.)
             if ((i & 1) && remaining > 0) {
                 int b = rle.read_byte();
                 if (b < 0) { *err_under = rle.err; return false; }
@@ -500,36 +508,85 @@ static bool decodeFrameTokens(FboxRleReader &rle, bool is_pf,
                         }
                     }
                 }
-                // Tail: any remaining bytes through the 2-pixel path.
+                // Tail: any remaining bytes through the 2-pixel path. Two
+                // shapes — even-i is the fast path (1 f4 byte per source
+                // byte, single 16-bit fb store); odd-i has to straddle two
+                // f4 bytes (LOW of f4[i>>1] + HIGH of f4[i>>1 + 1]) but the
+                // fb store is still byte-addressable so it stays cheap.
                 if (is_pf) {
-                    for (; k < take; k++) {
-                        uint8_t new_byte = (uint8_t)(f4[i >> 1] ^ src_ptr[k]);
-                        f4[i >> 1] = new_byte;
-                        *(uint16_t *)(fb + i) = clut_pair[new_byte];
-                        i += 2;
+                    if (i & 1) {
+                        for (; k < take; k++) {
+                            uint8_t s    = src_ptr[k];
+                            uint8_t s_hi = (uint8_t)((s >> 4) & 0x0F);
+                            uint8_t s_lo = (uint8_t)(s & 0x0F);
+                            uint8_t b0   = f4[i >> 1];
+                            uint8_t nl   = (uint8_t)((b0 & 0x0F) ^ s_hi);
+                            f4[i >> 1]   = (uint8_t)((b0 & 0xF0) | nl);
+                            fb[i]        = clut_lut[nl];
+                            i++;
+                            uint8_t b1   = f4[i >> 1];
+                            uint8_t nh   = (uint8_t)(((b1 >> 4) & 0x0F) ^ s_lo);
+                            f4[i >> 1]   = (uint8_t)((nh << 4) | (b1 & 0x0F));
+                            fb[i]        = clut_lut[nh];
+                            i++;
+                        }
+                    } else {
+                        for (; k < take; k++) {
+                            uint8_t new_byte = (uint8_t)(f4[i >> 1] ^ src_ptr[k]);
+                            f4[i >> 1] = new_byte;
+                            *(uint16_t *)(fb + i) = clut_pair[new_byte];
+                            i += 2;
+                        }
                     }
                 } else {
-                    for (; k < take; k++) {
-                        uint8_t new_byte = src_ptr[k];
-                        f4[i >> 1] = new_byte;
-                        *(uint16_t *)(fb + i) = clut_pair[new_byte];
-                        i += 2;
+                    if (i & 1) {
+                        for (; k < take; k++) {
+                            uint8_t s    = src_ptr[k];
+                            uint8_t s_hi = (uint8_t)((s >> 4) & 0x0F);
+                            uint8_t s_lo = (uint8_t)(s & 0x0F);
+                            uint8_t b0   = f4[i >> 1];
+                            f4[i >> 1]   = (uint8_t)((b0 & 0xF0) | s_hi);
+                            fb[i]        = clut_lut[s_hi];
+                            i++;
+                            uint8_t b1   = f4[i >> 1];
+                            f4[i >> 1]   = (uint8_t)((s_lo << 4) | (b1 & 0x0F));
+                            fb[i]        = clut_lut[s_lo];
+                            i++;
+                        }
+                    } else {
+                        for (; k < take; k++) {
+                            uint8_t new_byte = src_ptr[k];
+                            f4[i >> 1] = new_byte;
+                            *(uint16_t *)(fb + i) = clut_pair[new_byte];
+                            i += 2;
+                        }
                     }
                 }
                 rle.buf_pos += take;
                 remaining   -= (uint32_t)(take << 1);
             }
 
-            // Trailing single pixel (only the high nibble of one source byte).
+            // Trailing single pixel (only the high nibble of one source byte;
+            // the low nibble is the encoder's odd-count padding). Lands on
+            // HIGH nib of f4[i>>1] when i is even, LOW nib when i is odd —
+            // odd i happens when the literal started odd and bulk advanced
+            // by an odd number of pixel-pairs.
             if (remaining > 0) {
                 int b = rle.read_byte();
                 if (b < 0) { *err_under = rle.err; return false; }
                 uint8_t hi = (uint8_t)((b >> 4) & 0x0F);
                 uint8_t prev = f4[i >> 1];
-                uint8_t pn   = (uint8_t)((prev >> 4) & 0x0F);
-                uint8_t cn   = is_pf ? (uint8_t)(hi ^ pn) : hi;
-                f4[i >> 1] = (uint8_t)((cn << 4) | (prev & 0x0F));
-                fb[i] = clut_lut[cn];
+                if (i & 1) {
+                    uint8_t pn = (uint8_t)(prev & 0x0F);
+                    uint8_t cn = is_pf ? (uint8_t)(hi ^ pn) : hi;
+                    f4[i >> 1] = (uint8_t)((prev & 0xF0) | cn);
+                    fb[i] = clut_lut[cn];
+                } else {
+                    uint8_t pn = (uint8_t)((prev >> 4) & 0x0F);
+                    uint8_t cn = is_pf ? (uint8_t)(hi ^ pn) : hi;
+                    f4[i >> 1] = (uint8_t)((cn << 4) | (prev & 0x0F));
+                    fb[i] = clut_lut[cn];
+                }
                 i++; remaining--;
             }
         }
@@ -1118,15 +1175,37 @@ PlaybackResult playFboxAnimationFromSD(const char *path, uint32_t ring_bytes)
         Serial.printf("playFboxAnimationFromSD: cannot open %s\n", path);
         return PlaybackResult::READ_UNDERRUN;
     }
+
+    // Loop until USER_CANCELLED (tap) or any error. Reaching EOF cleanly
+    // (OK) triggers a source rewind and another iteration. Any non-OK result
+    // breaks the loop — we don't want to spin on a broken file or a stuck
+    // ring loader.
+    auto loop_play = [](FboxSource &src, const char *label) {
+        PlaybackResult result;
+        uint32_t iter = 0;
+        while (true) {
+            result = playFboxAnimation(src);
+            Serial.printf("[ANIM] %s loop iter=%lu result=%d\n",
+                          label, (unsigned long)iter, (int)result);
+            if (result != PlaybackResult::OK) break;
+            if (!src.reset()) {
+                Serial.printf("[ANIM] %s loop: source reset failed; stopping\n", label);
+                break;
+            }
+            iter++;
+        }
+        return result;
+    };
+
     FboxSourceRingBuffered buf_src(&sd_src, ring_bytes);
     if (!buf_src.ok()) {
         Serial.println("playFboxAnimationFromSD: ring alloc failed; using direct SD source");
-        return playFboxAnimation(sd_src);
+        return loop_play(sd_src, "sd");
     }
     Serial.printf("[ANIM] ring buffer: %lu KB PSRAM, async SD loader on core 1\n",
                   (unsigned long)(ring_bytes / 1024));
-    PlaybackResult result = playFboxAnimation(buf_src);
-    Serial.printf("[ANIM] ring stalls=%u stall_time=%llums\n",
+    PlaybackResult result = loop_play(buf_src, "ring");
+    Serial.printf("[ANIM] ring stalls=%u stall_time=%llums (cumulative across loops)\n",
                   buf_src.stallCount(), buf_src.stallTimeUs() / 1000);
     return result;
 }
