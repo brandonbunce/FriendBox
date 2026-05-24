@@ -25,7 +25,7 @@ void initUIForScreenFileBrowser()
                                                                  SCREEN_FILE_BROWSER_FILE_BUTTON[col].w, SCREEN_FILE_BROWSER_FILE_BUTTON[col].h, TFT_WHITE,
                                                                  SCREEN_FILE_BROWSER_FILE_BUTTON[col].fillColor, (int)draw_color_palette_text_color[currentDrawColorIndex],
                                                                  "File Name", 2, 2);
-        uiButtons.push_back(&SCREEN_FILE_BROWSER_FILE_BUTTON[col]);
+        registerUIButton(&SCREEN_FILE_BROWSER_FILE_BUTTON[col]);
     }
 
     for (int col = 0; col < SCREEN_FILE_BROWSER_NAVI_BUTTON_COUNT; col++)
@@ -41,7 +41,7 @@ void initUIForScreenFileBrowser()
                                                                  SCREEN_FILE_BROWSER_NAVI_BUTTON[col].w, SCREEN_FILE_BROWSER_NAVI_BUTTON[col].h, TFT_WHITE,
                                                                  SCREEN_FILE_BROWSER_NAVI_BUTTON[col].fillColor, (int)draw_color_palette_text_color[currentDrawColorIndex],
                                                                  SCREEN_FILE_BROWSER_NAVI_BUTTON_LABEL[col], 2, 2);
-        uiButtons.push_back(&SCREEN_FILE_BROWSER_NAVI_BUTTON[col]);
+        registerUIButton(&SCREEN_FILE_BROWSER_NAVI_BUTTON[col]);
     }
 }
 

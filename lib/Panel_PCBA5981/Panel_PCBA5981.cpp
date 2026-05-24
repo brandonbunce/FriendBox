@@ -297,6 +297,59 @@ uint32_t Panel_PCBA5981::readMainImageAddress(void)
     return v;
 }
 
+uint16_t Panel_PCBA5981::readMainImageWidth(void)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+    uint16_t v = (uint16_t)_read_reg_byte(0x24)
+               | ((uint16_t)_read_reg_byte(0x25) << 8);
+    if (!tr) end_transaction();
+    return v;
+}
+
+uint16_t Panel_PCBA5981::readCanvasImageWidth(void)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+    uint16_t v = (uint16_t)_read_reg_byte(0x54)
+               | ((uint16_t)_read_reg_byte(0x55) << 8);
+    if (!tr) end_transaction();
+    return v;
+}
+
+uint16_t Panel_PCBA5981::readMainWindowUpperLeftX(void)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+    uint16_t v = (uint16_t)_read_reg_byte(0x26)
+               | ((uint16_t)_read_reg_byte(0x27) << 8);
+    if (!tr) end_transaction();
+    return v;
+}
+
+uint16_t Panel_PCBA5981::readMainWindowUpperLeftY(void)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+    uint16_t v = (uint16_t)_read_reg_byte(0x28)
+               | ((uint16_t)_read_reg_byte(0x29) << 8);
+    if (!tr) end_transaction();
+    return v;
+}
+
+void Panel_PCBA5981::reassertScanoutConfig(uint16_t width, uint16_t height)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+    _write_reg16(0x24, width);     // MIW
+    _write_reg16(0x26, 0);         // MWULX
+    _write_reg16(0x28, 0);         // MWULY
+    _write_reg16(0x54, width);     // CIW
+    _set_active_window(0, 0, width, height);
+    _flg_memorywrite = false;
+    if (!tr) end_transaction();
+}
+
 void Panel_PCBA5981::setCanvasAddress(uint32_t addr)
 {
     bool tr = _in_transaction;
@@ -381,6 +434,62 @@ void Panel_PCBA5981::fillCircleGPU(uint16_t cx, uint16_t cy,
     _flg_memorywrite = false;
 
     if (!tr) end_transaction();
+}
+
+// Rounded-rect via the Geometric Drawing Engine (datasheet §6.6, pg. 50).
+// Start/stop endpoints go into REG[68h-6Fh] (same as plain rect); corner X/Y
+// radii go into REG[77h-7Ah] (same as circle/ellipse axes); foreground colour
+// goes into REG[D2h-D4h]. REG[76h] DCR1 kick:
+//   bit7=1          start
+//   bit6=fill       1 = filled, 0 = outline
+//   bits[5:4]=11b   rounded-rectangle
+// => 0xF0 for fill, 0xB0 for outline. Datasheet notes 1/2: the rectangle must
+// be wider than 2*rx+1 and taller than 2*ry+1; LovyanGFX's r = min(w,h)>>2
+// (used by LGFX_Button) trivially satisfies that.
+void Panel_PCBA5981::_round_rect_kick(uint16_t x1, uint16_t y1,
+                                      uint16_t x2, uint16_t y2,
+                                      uint16_t rx, uint16_t ry,
+                                      uint16_t rgb565, bool fill)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+
+    // GDE clips against the Active Window; LovyanGFX pixel paths leave it
+    // pinned to a scanline strip. Restore full canvas before the kick.
+    _set_active_window(0, 0, timing.h_display, timing.v_display);
+
+    _set_forecolor(rgb565);
+
+    _write_reg16(0x68, x1);   // DLHSR : start X
+    _write_reg16(0x6A, y1);   // DLVSR : start Y
+    _write_reg16(0x6C, x2);   // DLHER : end   X
+    _write_reg16(0x6E, y2);   // DLVER : end   Y
+
+    _write_reg16(0x77, rx);   // ELL_A : X-axis (long) corner radius
+    _write_reg16(0x79, ry);   // ELL_B : Y-axis (short) corner radius
+
+    _write_reg(0x76, fill ? 0xF0 : 0xB0);
+
+    _wait_busy();
+    _flg_memorywrite = false;
+
+    if (!tr) end_transaction();
+}
+
+void Panel_PCBA5981::fillRoundRectGPU(uint16_t x1, uint16_t y1,
+                                      uint16_t x2, uint16_t y2,
+                                      uint16_t rx, uint16_t ry,
+                                      uint16_t rgb565)
+{
+    _round_rect_kick(x1, y1, x2, y2, rx, ry, rgb565, true);
+}
+
+void Panel_PCBA5981::drawRoundRectGPU(uint16_t x1, uint16_t y1,
+                                      uint16_t x2, uint16_t y2,
+                                      uint16_t rx, uint16_t ry,
+                                      uint16_t rgb565)
+{
+    _round_rect_kick(x1, y1, x2, y2, rx, ry, rgb565, false);
 }
 
 void Panel_PCBA5981::blitFrames(uint32_t src_addr, uint16_t src_x, uint16_t src_y,

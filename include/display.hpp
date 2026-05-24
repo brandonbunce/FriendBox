@@ -26,6 +26,11 @@
 // Four slots = 4 * 460,800 = ~1.84 MB; well within the 16 MB SDRAM.
 #define LT7680_SLOT_ANIM   (LT7680_FRAME_BYTES * 2u)
 #define LT7680_SLOT_ANIM_B (LT7680_FRAME_BYTES * 3u)
+// Cache slot for the playback-menu overlay: rendered once on state change,
+// then BTE-blit onto each back ANIM buffer. Per-frame cost drops from
+// ~22 GPU rounded-rect kicks + 9 software text labels (~10–20 ms) to a
+// single ~100 KB BTE copy (~1–2 ms).
+#define LT7680_SLOT_MENU   (LT7680_FRAME_BYTES * 4u)
 
 extern LGFX tft;
 /* Tracks touch location in current tick- If Z>0 then touching. */
@@ -59,6 +64,21 @@ void displayFrameEnd();
 void displayAnimFrameBegin();
 void displayAnimWriteFrame(const uint8_t* clut8);
 void displayAnimFrameEnd();
+
+/** Playback-menu overlay helpers (see io.cpp pb_*). The menu is rendered
+ *  once into SLOT_MENU on state change, then BTE-blit onto the back ANIM
+ *  buffer each frame instead of re-running 20+ rounded-rect GPU kicks and
+ *  per-character text rendering.
+ *
+ *  displayAnimCanvasToMenuCache() points the LovyanGFX canvas at SLOT_MENU
+ *  so subsequent draw calls land in the cache. The next
+ *  displayAnimFrameBegin() resets the canvas back to the active ANIM slot.
+ *
+ *  displayAnimBlitMenuToBack(x, y, w, h) copies the given rect from
+ *  SLOT_MENU into the current back ANIM slot. Must run between
+ *  displayAnimFrameBegin and displayAnimFrameEnd. */
+void displayAnimCanvasToMenuCache();
+void displayAnimBlitMenuToBack(int x, int y, int w, int h);
 
 /** Write one scanline using BTE hardware fills for runs of ≥5 same-color
  *  pixels and raw SPI writes for mixed segments. Must be called between

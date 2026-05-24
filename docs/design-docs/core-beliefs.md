@@ -8,6 +8,10 @@ Guiding constraints for working in this codebase. These are not style preference
 
 The ESP32 has limited heap. The LT7680A SDRAM holds framebuffers, not arbitrary data. Every allocation decision should justify itself against this constraint. Prefer stack, static arrays, and fixed-size buffers over heap allocations in hot paths.
 
+## Stable animations are a must.
+
+24fps animations must be possible with even the most intense .fbox file.
+
 ## The palette is intentional, not a limitation
 
 16 colors (4-bit palette indices, packed 2-per-byte) was chosen deliberately. It keeps sketch file size at a fixed 115,200 bytes, enables fast SD read/write, and gives the device a distinct aesthetic. Do not expand the palette without a deliberate design decision.
@@ -23,7 +27,3 @@ The touch queue in `display.cpp` decouples hardware timing from UI logic. UI cod
 ## SD card is the primary persistence layer
 
 NVS stores only small preferences (palette selection, etc.). Sketches live on SD. Network sync of sketches is aspirational — do not design features assuming reliable cloud storage.
-
-## The UI module needs to be broken up
-
-`ui.cpp` (~1,300 lines) is acknowledged technical debt. It is functional but unmaintainable at its current size. New UI screens should not be added to this file without a plan to decompose it. See [tech-debt-tracker.md](../exec-plans/tech-debt-tracker.md).

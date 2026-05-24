@@ -15,6 +15,53 @@ screen_id_t lastScreen;
 
 static bool s_initialized[10] = {};
 
+// LovyanGFX stores button colors as 24-bit RGB888; the LT7680 GPU expects
+// RGB565. Pack via the canonical (R>>3,G>>2,B>>3) shift.
+static inline uint16_t rgb888_to_rgb565(uint32_t c)
+{
+    return (uint16_t)(((c >> 8) & 0xF800) | ((c >> 5) & 0x07E0) | ((c >> 3) & 0x001F));
+}
+
+// LGFX_Button::drawButton replacement that uses the LT7680 Geometric Drawing
+// Engine for the body + outline (one rounded-rect kick each) instead of the
+// LovyanGFX software arc decomposition. Text path is unchanged.
+static void uiButtonDrawCbGPU(LGFX_Button *btn, LovyanGFX *gfx,
+                              int32_t x, int32_t y, int32_t w, int32_t h,
+                              bool inverted, const char *long_name)
+{
+    LGFX *lgfx = static_cast<LGFX *>(gfx);
+
+    uint32_t fill_888    = inverted ? btn->getTextColor() : btn->getFillColor();
+    uint32_t text_888    = inverted ? btn->getFillColor() : btn->getTextColor();
+    uint32_t outline_888 = btn->getOutlineColor();
+
+    uint16_t fill565    = rgb888_to_rgb565(fill_888);
+    uint16_t outline565 = rgb888_to_rgb565(outline_888);
+
+    int32_t r = (w < h ? w : h) >> 2;
+
+    auto style = lgfx->getTextStyle();
+    lgfx->setTextSize(btn->getTextSizeX(), btn->getTextSizeY());
+    lgfx->setTextDatum(btn->getLabelDatum());
+    lgfx->setTextPadding(0);
+    lgfx->setTextColor(text_888, fill_888);
+
+    lgfx->startWrite();
+    lgfx->fillRoundRectGPU(x, y, w, h, r, fill565);
+    lgfx->drawRoundRectGPU(x, y, w, h, r, outline565);
+    lgfx->drawString(long_name, x + (w >> 1) + btn->getLabelXDelta(),
+                                y + (h >> 1) + btn->getLabelYDelta());
+    lgfx->endWrite();
+
+    lgfx->setTextStyle(style);
+}
+
+void registerUIButton(UIButton *btn)
+{
+    btn->button.setDrawCb(uiButtonDrawCbGPU);
+    uiButtons.push_back(btn);
+}
+
 bool handleUIButtonPress(UIButton *targetButton, ui_button_mode_id_t buttonMode)
 {
     bool isTouching = touchZ && targetButton->button.contains(touchX, touchY);

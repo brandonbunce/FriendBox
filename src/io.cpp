@@ -618,8 +618,8 @@ struct ProducerCtx {
     uint32_t            audio_block_bytes;
     // v4: scratch buffers — kept off the producer task stack to avoid blowing
     // the 16 KB budget. Owned by playFboxAnimation; producer uses but doesn't free.
-    uint8_t            *audio_block_scratch;   // audio_block_bytes (≤ ~470 bytes)
-    int16_t            *pcm_scratch;           // hdr->audio_samples_per_frame samples (≤ ~1.8 KB)
+    uint8_t            *audio_block_scratch;   // audio_block_bytes (PSRAM)
+    int16_t            *pcm_scratch;           // hdr->audio_samples_per_frame samples (PSRAM)
     // v4: keyframe table parsed at file end (after last frame). 0 = no table.
     std::vector<KeyframeEntry> *keyframes;
     // Profiling totals (µs)
@@ -632,6 +632,196 @@ struct ProducerCtx {
     uint32_t            n_frames;       // number of frames measured
     uint32_t            n_skip_frames;  // count of 'S' frames seen
 };
+
+} // namespace (close so the playback menu state is reachable from
+  //            playFboxAnimationFromSD's loop wrapper below)
+
+// ── Playback menu overlay ───────────────────────────────────────────────────
+// Tap-on-animation pops up a centered menu: 4 stacked main buttons (Stop /
+// Pause / Loop / Restart) plus a horizontal row of 5 volume presets
+// (0/25/50/75/100). Drawn on top of each animation frame on the BACK ANIM
+// buffer after the SPI burst but before the page flip — so it lands on
+// whichever buffer is about to be scanned out, regardless of the page-flip
+// alternation. While paused, the consumer holds its last non-SKIP slot and
+// re-blits it every frame so the menu stays composited on top.
+//
+// State persists across playFboxAnimation calls — `loop_enabled` survives a
+// Restart, and any subsequent call from playFboxAnimationFromSD honors it.
+// Volume lives in audio_i2s.cpp and also persists across calls. Per-call state
+// (menu_open, paused, stop_requested, restart_requested) is reset at the top
+// of playFboxAnimation.
+
+enum PlaybackMenuButton : int {
+    PB_BTN_STOP    = 0,
+    PB_BTN_PAUSE   = 1,
+    PB_BTN_LOOP    = 2,
+    PB_BTN_RESTART = 3,
+    PB_BTN_COUNT   = 4,
+};
+
+struct PlaybackController {
+    bool menu_open;
+    bool paused;
+    bool loop_enabled;        // persists across calls; default on
+    bool stop_requested;      // one-shot: consumer returns USER_CANCELLED
+    bool restart_requested;   // one-shot: consumer returns USER_RESTART
+};
+
+static PlaybackController g_pbc = {
+    /* menu_open        = */ false,
+    /* paused           = */ false,
+    /* loop_enabled     = */ true,
+    /* stop_requested   = */ false,
+    /* restart_requested= */ false,
+};
+
+constexpr int PB_MENU_X  = 100;
+constexpr int PB_MENU_Y  = 60;
+constexpr int PB_MENU_W  = 280;
+constexpr int PB_MENU_H  = 360;
+constexpr int PB_BTN_X   = 120;
+constexpr int PB_BTN_W   = 240;
+constexpr int PB_BTN_H   = 50;
+constexpr int PB_BTN_GAP = 8;
+constexpr int PB_BTN_Y0  = 70;
+
+constexpr int     PB_VOL_COUNT             = 5;
+constexpr uint8_t PB_VOL_PCT[PB_VOL_COUNT] = {0, 25, 50, 75, 100};
+constexpr int     PB_VOL_GAP               = 4;
+constexpr int     PB_VOL_H                 = 50;
+// 5 buttons share PB_BTN_W: each is (W - 4 gaps) / 5 = 44 px.
+constexpr int     PB_VOL_W                 = (PB_BTN_W - (PB_VOL_COUNT - 1) * PB_VOL_GAP) / PB_VOL_COUNT;
+// Placed below the 4 main buttons with a slightly bigger gap as a separator.
+constexpr int     PB_VOL_Y                 = PB_BTN_Y0 + PB_BTN_COUNT * (PB_BTN_H + PB_BTN_GAP) + PB_BTN_GAP;
+
+// Hit-test result encoding:
+//   PB_HIT_OUTSIDE → tap was outside the menu rect (caller dismisses)
+//   PB_HIT_NONE    → tap inside the menu but not on any button (no-op)
+//   0..3           → main button index (PB_BTN_*)
+//   PB_HIT_VOL0+i  → volume preset index i (indexes PB_VOL_PCT)
+constexpr int PB_HIT_OUTSIDE = -2;
+constexpr int PB_HIT_NONE    = -1;
+constexpr int PB_HIT_VOL0    = 10;
+
+static inline int pb_btn_y(int idx) { return PB_BTN_Y0 + idx * (PB_BTN_H + PB_BTN_GAP); }
+static inline int pb_vol_x(int idx) { return PB_BTN_X  + idx * (PB_VOL_W + PB_VOL_GAP); }
+
+static bool pb_rect_contains(int rx, int ry, int rw, int rh, int x, int y)
+{
+    return x >= rx && x < rx + rw && y >= ry && y < ry + rh;
+}
+
+static int pb_hit_test(int x, int y)
+{
+    if (!pb_rect_contains(PB_MENU_X, PB_MENU_Y, PB_MENU_W, PB_MENU_H, x, y)) return PB_HIT_OUTSIDE;
+    for (int i = 0; i < PB_BTN_COUNT; i++) {
+        if (pb_rect_contains(PB_BTN_X, pb_btn_y(i), PB_BTN_W, PB_BTN_H, x, y)) return i;
+    }
+    for (int i = 0; i < PB_VOL_COUNT; i++) {
+        if (pb_rect_contains(pb_vol_x(i), PB_VOL_Y, PB_VOL_W, PB_VOL_H, x, y)) return PB_HIT_VOL0 + i;
+    }
+    return PB_HIT_NONE;
+}
+
+static void pb_handle_tap(PlaybackController &c, int x, int y)
+{
+    int hit = pb_hit_test(x, y);
+    if (hit == PB_HIT_OUTSIDE) { c.menu_open = false; return; }
+    if (hit >= PB_HIT_VOL0 && hit < PB_HIT_VOL0 + PB_VOL_COUNT) {
+        setI2SVolume(PB_VOL_PCT[hit - PB_HIT_VOL0]);
+        return;
+    }
+    switch (hit) {
+        case PB_BTN_STOP:    c.stop_requested    = true; break;
+        case PB_BTN_PAUSE:   c.paused            = !c.paused; break;
+        case PB_BTN_LOOP:    c.loop_enabled      = !c.loop_enabled; break;
+        case PB_BTN_RESTART: c.restart_requested = true; break;
+        default:             break;  // PB_HIT_NONE or anything else: no-op
+    }
+}
+
+// Snapshot of the state that affects what the menu LOOKS like (paused
+// label, loop highlight, volume highlight). Used to skip the expensive
+// re-render path when nothing changed. menu_open is NOT part of the cache
+// signature — opening/closing the menu doesn't change pixels, it only
+// toggles whether we composite at all.
+struct PlaybackMenuCache {
+    bool    valid;
+    bool    paused;
+    bool    loop_enabled;
+    uint8_t volume_pct;
+};
+static PlaybackMenuCache g_pbc_cache = { /*valid=*/false, false, false, 0 };
+
+static bool pb_cache_matches(const PlaybackController &c)
+{
+    return g_pbc_cache.valid
+        && g_pbc_cache.paused       == c.paused
+        && g_pbc_cache.loop_enabled == c.loop_enabled
+        && g_pbc_cache.volume_pct   == getI2SVolume();
+}
+
+// Render the menu chrome + all buttons into LT7680_SLOT_MENU. The 20+
+// rounded-rect GPU kicks and text-rendering SPI traffic land in this slot
+// once per state change, then per-frame compose is a single BTE blit. The
+// caller is responsible for ensuring this is invoked inside an active
+// startWrite() (i.e. between displayAnimFrameBegin and displayAnimFrameEnd)
+// — switching canvas to SLOT_MENU here does NOT need to be restored, since
+// the next displayAnimFrameBegin re-points it at the back ANIM slot anyway.
+static void pb_render_menu_to_cache(const PlaybackController &c)
+{
+    displayAnimCanvasToMenuCache();
+
+    tft.fillRoundRectGPU(PB_MENU_X-2, PB_MENU_Y-2, PB_MENU_W+4, PB_MENU_H+4, 10, 0xFFFF);  // white border
+    tft.fillRoundRectGPU(PB_MENU_X,   PB_MENU_Y,   PB_MENU_W,   PB_MENU_H,   10, 0x0000);  // black fill
+
+    const char *labels[PB_BTN_COUNT];
+    labels[PB_BTN_STOP]    = "Stop";
+    labels[PB_BTN_PAUSE]   = c.paused        ? "Resume" : "Pause";
+    labels[PB_BTN_LOOP]    = c.loop_enabled  ? "Loop: On" : "Loop: Off";
+    labels[PB_BTN_RESTART] = "Restart";
+
+    tft.setTextSize(2);
+    for (int i = 0; i < PB_BTN_COUNT; i++) {
+        int by = pb_btn_y(i);
+        uint16_t fill   = (i == PB_BTN_LOOP && c.loop_enabled) ? 0x07E0 /*green*/ : 0x4208 /*dark gray*/;
+        uint16_t border = 0xFFFF;
+        tft.fillRoundRectGPU(PB_BTN_X-1, by-1, PB_BTN_W+2, PB_BTN_H+2, 10, border);
+        tft.fillRoundRectGPU(PB_BTN_X,   by,   PB_BTN_W,   PB_BTN_H,   10, fill);
+        tft.setTextColor(0xFFFF, fill);
+        tft.drawCenterString(labels[i], PB_BTN_X + PB_BTN_W / 2, by + PB_BTN_H / 2 - 8);
+    }
+
+    const uint8_t cur_pct = getI2SVolume();
+    tft.setTextSize(1);
+    for (int i = 0; i < PB_VOL_COUNT; i++) {
+        int bx = pb_vol_x(i);
+        uint16_t fill   = (PB_VOL_PCT[i] == cur_pct) ? 0x07E0 /*green*/ : 0x4208 /*dark gray*/;
+        uint16_t border = 0xFFFF;
+        tft.fillRoundRectGPU(bx-1, PB_VOL_Y-1, PB_VOL_W+2, PB_VOL_H+2, 8, border);
+        tft.fillRoundRectGPU(bx,   PB_VOL_Y,   PB_VOL_W,   PB_VOL_H,   8, fill);
+        tft.setTextColor(0xFFFF, fill);
+        char label[8];
+        snprintf(label, sizeof(label), "%u", (unsigned)PB_VOL_PCT[i]);
+        tft.drawCenterString(label, bx + PB_VOL_W / 2, PB_VOL_Y + PB_VOL_H / 2 - 4);
+    }
+
+    g_pbc_cache.valid        = true;
+    g_pbc_cache.paused       = c.paused;
+    g_pbc_cache.loop_enabled = c.loop_enabled;
+    g_pbc_cache.volume_pct   = cur_pct;
+}
+
+// Composite the cached menu onto the current back ANIM buffer. Refreshes
+// the cache first iff the state-affecting fields changed.
+static void pb_draw_menu(const PlaybackController &c)
+{
+    if (!pb_cache_matches(c)) pb_render_menu_to_cache(c);
+    displayAnimBlitMenuToBack(PB_MENU_X - 2, PB_MENU_Y - 2,
+                              PB_MENU_W + 4, PB_MENU_H + 4);
+}
+
+namespace {
 
 // Read exactly `n` bytes from src into dst. Returns true on full read.
 static bool readExact(FboxSource *src, uint8_t *dst, uint32_t n)
@@ -777,6 +967,12 @@ void producerTask(void *param)
                 uint64_t t_msync_start = esp_timer_get_time();
                 esp_cache_msync(s.frame_buf, PIXEL_COUNT, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
                 ctx->t_msync_us += esp_timer_get_time() - t_msync_start;
+
+                // EXPERIMENT: Xtensa memw memory barrier. CPU-level barrier
+                // that prevents instruction reordering across it. Unlikely
+                // to help if the bug is in the external PSRAM controller's
+                // write queue (memw doesn't drain that), but cheap to verify.
+                __asm__ __volatile__ ("memw" ::: "memory");
             }
         }
         else if (!error) {
@@ -960,7 +1156,14 @@ PlaybackResult playFboxAnimation(FboxSource &src)
         }
     }
 
-    // v4 audio scratches — kept off the producer task stack.
+    // v4 audio scratches — kept off the producer task stack. PSRAM (not
+    // internal): low-fps / high-sample-rate files push pcm_scratch into the
+    // tens of KB (e.g. fps=1 @ 22050 Hz → samples_per_frame=22050 →
+    // pcm_scratch=44 KB), which OOMs internal heap after frame_4bpp (115 KB)
+    // and the producer/loader task stacks. Both buffers are touched only
+    // once per frame (ADPCM decode in/out + pushI2SSamples memcpy into a
+    // stream buffer); no DMA, no per-pixel hot loop, so PSRAM latency is
+    // negligible at the producer's frame cadence.
     const uint32_t audio_block_bytes = (hdr.audio_samples_per_frame > 0)
         ? (4u + ((uint32_t)hdr.audio_samples_per_frame + 1u) / 2u)
         : 0u;
@@ -968,9 +1171,9 @@ PlaybackResult playFboxAnimation(FboxSource &src)
     int16_t  *pcm_scratch         = nullptr;
     if (audio_block_bytes > 0) {
         audio_block_scratch = (uint8_t *)heap_caps_malloc(audio_block_bytes,
-                                                          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         pcm_scratch = (int16_t *)heap_caps_malloc(hdr.audio_samples_per_frame * sizeof(int16_t),
-                                                  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!audio_block_scratch || !pcm_scratch) {
             Serial.println("[ANIM] audio scratch alloc failed");
             if (audio_block_scratch) free(audio_block_scratch);
@@ -1043,7 +1246,57 @@ PlaybackResult playFboxAnimation(FboxSource &src)
     uint16_t frames_drawn = 0;
     TickType_t prev_wake = xTaskGetTickCount();
 
+    // Reset per-call playback-menu state. loop_enabled persists.
+    g_pbc.menu_open         = false;
+    g_pbc.paused            = false;
+    g_pbc.stop_requested    = false;
+    g_pbc.restart_requested = false;
+
+    // held_slot is the most recent non-SKIP slot whose sem_free we have NOT
+    // released. While paused, we re-blit this slot's frame_buf every frame so
+    // the displayed image stays consistent through page flips. Holding one
+    // slot leaves the producer 2 of 3 to work with — fine for forward
+    // progress, and producer naturally blocks on sem_free once paused.
+    Slot *held_slot = nullptr;
+    bool  last_touch_active = (touchZ > 0);  // seed so existing touch doesn't fire on entry
+
     while (consumer_running) {
+        // ── PAUSED branch ─────────────────────────────────────────────────
+        // Reuse the held slot, redraw + menu, pace and poll. Don't take a
+        // new slot from sem_ready; producer will fill and block on sem_free.
+        if (g_pbc.paused && held_slot) {
+            displayAnimFrameBegin();
+            displayAnimWriteFrame(held_slot->frame_buf);
+            if (g_pbc.menu_open) pb_draw_menu(g_pbc);
+            displayAnimFrameEnd();
+
+            handleTouch();
+            bool cur = (touchZ > 0);
+            if (cur && !last_touch_active) {
+                if (!g_pbc.menu_open) g_pbc.menu_open = true;
+                else                  pb_handle_tap(g_pbc, touchX, touchY);
+            }
+            last_touch_active = cur;
+
+            if (g_pbc.stop_requested) {
+                Serial.printf("[ANIM] consumer exit: USER_CANCELLED (paused, drawn=%u)\n",
+                              frames_drawn);
+                result = PlaybackResult::USER_CANCELLED;
+                consumer_running = false;
+                break;
+            }
+            if (g_pbc.restart_requested) {
+                Serial.printf("[ANIM] consumer exit: USER_RESTART (paused, drawn=%u)\n",
+                              frames_drawn);
+                result = PlaybackResult::USER_RESTART;
+                consumer_running = false;
+                break;
+            }
+            vTaskDelayUntil(&prev_wake, pdMS_TO_TICKS(frame_ms));
+            continue;
+        }
+
+        // ── NOT PAUSED: advance pipeline ─────────────────────────────────
         uint32_t t_wait_start = millis();
         if (xSemaphoreTake(sem_ready, pdMS_TO_TICKS(2000)) != pdTRUE) {
             Serial.println("[ANIM] consumer timeout waiting for slot");
@@ -1076,29 +1329,48 @@ PlaybackResult playFboxAnimation(FboxSource &src)
         }
 
         if (s.state == SLOT_SKIP) {
-            // Skip frame: LT7680 retains the previous frame on its own canvas
-            // (displayAnimWriteFrame is the only thing that mutates display
-            // memory). No SPI burst needed; we still pace and poll touch and
-            // count it as drawn so fps reporting is honest.
+            // SKIP: no blit (LT7680 retains the previous frame). Release
+            // immediately — SKIP slots are never the held slot.
             frames_drawn++;
+            xSemaphoreGive(sem_free);
+            slot_idx = (slot_idx + 1) % RING_SLOTS;
         } else {
             uint32_t t_spi = millis();
             displayAnimFrameBegin();
             displayAnimWriteFrame(s.frame_buf);
+            if (g_pbc.menu_open) pb_draw_menu(g_pbc);
             displayAnimFrameEnd();
             t_spi_total += millis() - t_spi;
             frames_drawn++;
+
+            // Release the previously held slot (if any), then become the
+            // new held slot. We don't release &s until the next non-SKIP
+            // blit (or until consumer exits).
+            if (held_slot) xSemaphoreGive(sem_free);
+            held_slot = &s;
+            slot_idx = (slot_idx + 1) % RING_SLOTS;
         }
 
-        xSemaphoreGive(sem_free);
-        slot_idx = (slot_idx + 1) % RING_SLOTS;
-
-        // Touch poll once per frame (latency ≤ frame_ms, fine at 24 fps).
+        // Touch + menu dispatch.
         handleTouch();
-        if (touchZ > 0) {
+        bool cur = (touchZ > 0);
+        if (cur && !last_touch_active) {
+            if (!g_pbc.menu_open) g_pbc.menu_open = true;
+            else                  pb_handle_tap(g_pbc, touchX, touchY);
+        }
+        last_touch_active = cur;
+
+        if (g_pbc.stop_requested) {
             Serial.printf("[ANIM] consumer exit: USER_CANCELLED at frame_idx=%u drawn=%u\n",
                           s.frame_idx, frames_drawn);
             result = PlaybackResult::USER_CANCELLED;
+            consumer_running = false;
+            break;
+        }
+        if (g_pbc.restart_requested) {
+            Serial.printf("[ANIM] consumer exit: USER_RESTART at frame_idx=%u drawn=%u\n",
+                          s.frame_idx, frames_drawn);
+            result = PlaybackResult::USER_RESTART;
             consumer_running = false;
             break;
         }
@@ -1106,6 +1378,9 @@ PlaybackResult playFboxAnimation(FboxSource &src)
         // Precise pacing.
         vTaskDelayUntil(&prev_wake, pdMS_TO_TICKS(frame_ms));
     }
+
+    // Release the held slot before tearing down semaphores.
+    if (held_slot) { xSemaphoreGive(sem_free); held_slot = nullptr; }
 
     // Tear down producer
     cancel = true;
@@ -1176,18 +1451,22 @@ PlaybackResult playFboxAnimationFromSD(const char *path, uint32_t ring_bytes)
         return PlaybackResult::READ_UNDERRUN;
     }
 
-    // Loop until USER_CANCELLED (tap) or any error. Reaching EOF cleanly
-    // (OK) triggers a source rewind and another iteration. Any non-OK result
-    // breaks the loop — we don't want to spin on a broken file or a stuck
-    // ring loader.
+    // Loop control:
+    //   OK            → rewind & loop iff the playback menu's Loop toggle is on.
+    //   USER_RESTART  → always rewind & loop (user explicitly asked).
+    //   USER_CANCELLED → break (user hit Stop).
+    //   anything else → break (don't spin on a broken file or a stuck loader).
     auto loop_play = [](FboxSource &src, const char *label) {
         PlaybackResult result;
         uint32_t iter = 0;
         while (true) {
             result = playFboxAnimation(src);
-            Serial.printf("[ANIM] %s loop iter=%lu result=%d\n",
-                          label, (unsigned long)iter, (int)result);
-            if (result != PlaybackResult::OK) break;
+            Serial.printf("[ANIM] %s loop iter=%lu result=%d (loop=%d)\n",
+                          label, (unsigned long)iter, (int)result,
+                          g_pbc.loop_enabled ? 1 : 0);
+            bool should_rewind = (result == PlaybackResult::USER_RESTART) ||
+                                 (result == PlaybackResult::OK && g_pbc.loop_enabled);
+            if (!should_rewind) break;
             if (!src.reset()) {
                 Serial.printf("[ANIM] %s loop: source reset failed; stopping\n", label);
                 break;

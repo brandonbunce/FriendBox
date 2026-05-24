@@ -13,6 +13,11 @@ static volatile bool        s_stop_writer  = false;
 static volatile bool        s_writer_done  = true;
 static uint32_t             s_drops        = 0;
 
+// Volume: Q15 multiplier (0..32768). 32768 = unity gain. Persists across
+// start/stop cycles. Atomic 16-bit read/write on Xtensa, no lock needed.
+static volatile uint16_t    s_volume_q15   = 32768;
+static volatile uint8_t     s_volume_pct   = 100;
+
 static bool installChannel(uint32_t sample_rate)
 {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
@@ -80,10 +85,33 @@ static void writerTask(void *)
         if (got_bytes == 0) continue;  // re-check stop flag, then wait again
 
         uint32_t got_samples = got_bytes / sizeof(int16_t);
-        for (uint32_t k = 0; k < got_samples; k++) {
-            int16_t s = mono[k];
-            s_stereo_scratch[k * 2]     = s;
-            s_stereo_scratch[k * 2 + 1] = s;
+        // Snapshot the volume once per chunk so a mid-loop change can't
+        // cause an audible step inside a 256-sample window. The 16-bit
+        // load is atomic on Xtensa.
+        const uint16_t vol = s_volume_q15;
+        if (vol == 32768) {
+            // Unity-gain fast path: no multiply, just memcpy via expansion.
+            for (uint32_t k = 0; k < got_samples; k++) {
+                int16_t s = mono[k];
+                s_stereo_scratch[k * 2]     = s;
+                s_stereo_scratch[k * 2 + 1] = s;
+            }
+        } else if (vol == 0) {
+            // Mute fast path.
+            for (uint32_t k = 0; k < got_samples; k++) {
+                s_stereo_scratch[k * 2]     = 0;
+                s_stereo_scratch[k * 2 + 1] = 0;
+            }
+        } else {
+            // Q15 scale: int16 × uint16 → int32, shift back to int16. No
+            // overflow possible since |mono| ≤ 32767 and vol ≤ 32768, so
+            // the product fits in int32 with room to spare.
+            for (uint32_t k = 0; k < got_samples; k++) {
+                int32_t scaled = ((int32_t)mono[k] * (int32_t)vol) >> 15;
+                int16_t s = (int16_t)scaled;
+                s_stereo_scratch[k * 2]     = s;
+                s_stereo_scratch[k * 2 + 1] = s;
+            }
         }
         size_t written = 0;
         esp_err_t err = i2s_channel_write(s_tx_chan, s_stereo_scratch,
@@ -198,4 +226,21 @@ void stopI2SStreaming()
     if (s_drops > 0) {
         printf("[I2S] total push drops: %u\n", s_drops);
     }
+}
+
+void setI2SVolume(uint8_t pct)
+{
+    if (pct > 100) pct = 100;
+    // UI slider exposes 0..100, but the NS4168 + speaker combo clips and the
+    // case rattles above ~half gain. Cap the actual Q15 multiplier at 16384
+    // (50% of unity). pct=100 → 16384, pct=50 → 8192, pct=0 → mute. The
+    // returned getI2SVolume() still reports the UI percentage so the menu
+    // highlight tracks the slider, not the underlying gain.
+    s_volume_q15 = (uint16_t)((uint32_t)pct * 16384u / 100u);
+    s_volume_pct = pct;
+}
+
+uint8_t getI2SVolume(void)
+{
+    return s_volume_pct;
 }

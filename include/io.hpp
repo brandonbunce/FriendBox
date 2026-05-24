@@ -63,7 +63,8 @@ enum class PlaybackResult {
     READ_UNDERRUN,     // source returned -1 mid-stream (network died, SD ejected)
     DECODE_ERROR,      // bad header, bad RLE, dimensions mismatch
     CRC_MISMATCH,      // file CRC32 didn't match header value
-    USER_CANCELLED,    // touch input aborted playback
+    USER_CANCELLED,    // user hit Stop in the playback menu
+    USER_RESTART,      // user hit Restart in the playback menu (loop wrapper rewinds)
     OOM                // ps_malloc failed
 };
 

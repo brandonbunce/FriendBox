@@ -51,11 +51,29 @@ void displayAnimWriteFrame(const uint8_t* clut8)
     pcba_panel()->writeRawFrame8bpp(clut8, (uint32_t)TFT_HOR_RES * TFT_VER_RES);
 }
 
+void displayAnimCanvasToMenuCache()
+{
+    pcba_panel()->setCanvasAddress(LT7680_SLOT_MENU);
+}
+
+void displayAnimBlitMenuToBack(int x, int y, int w, int h)
+{
+    uint32_t back = _anim_slot_b ? LT7680_SLOT_ANIM_B : LT7680_SLOT_ANIM;
+    pcba_panel()->blitFrames(LT7680_SLOT_MENU, (uint16_t)x, (uint16_t)y,
+                              back, (uint16_t)x, (uint16_t)y,
+                              (uint16_t)w, (uint16_t)h);
+}
+
 void displayAnimFrameEnd()
 {
     uint32_t back = _anim_slot_b ? LT7680_SLOT_ANIM_B : LT7680_SLOT_ANIM;
-    pcba_panel()->setMainImageAddress(back);
+    // Wait for VBlank BEFORE re-pointing MISA so the 4-byte register update at
+    // REG[20h..23h] lands while the scanout isn't actively sampling MISA. The
+    // original order (setMainImageAddress → waitVSync) wrote MISA at a random
+    // scan position; suspected cause of an intermittent stable horizontal
+    // shift where one of the four MISA bytes appeared to latch mid-scan.
     pcba_panel()->waitVSync();
+    pcba_panel()->setMainImageAddress(back);
     _anim_slot_b = !_anim_slot_b;
     pcba_panel()->setCanvasAddress(LT7680_SLOT_CANVAS);
     tft.endWrite();

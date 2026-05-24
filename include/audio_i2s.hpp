@@ -27,4 +27,16 @@ bool pushI2SSamples(const int16_t *pcm, uint32_t n_samples);
  * I2S channel. No-op if not running. */
 void stopI2SStreaming();
 
+/* Software volume control. NS4168 is a fixed-gain Class-D amp (no digital
+ * volume input), so attenuation must happen in PCM before I2S. Scaling lives
+ * in the writer task's mono→stereo expansion — single chokepoint, takes
+ * effect within ~12 ms of a setter call (one writer chunk).
+ *
+ * pct: 0 = mute, 100 = unity gain. Internally stored as a Q15 multiplier.
+ * Linear curve: perceived loudness drops sharply below ~50%. Swap to a log
+ * curve if a UI volume slider feels too binary. Persists across
+ * start/stopI2SStreaming() cycles; defaults to 100. */
+void    setI2SVolume(uint8_t pct);
+uint8_t getI2SVolume(void);
+
 #endif

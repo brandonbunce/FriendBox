@@ -21,6 +21,7 @@
 #include "io.hpp"
 #include "network.hpp"
 #include "ui_core.hpp"
+#include "audio_i2s.hpp"
 
 #define FRIENDBOX_DEBUG_MODE true
 #define FRIENDBOX_SOFTWARE_VERSION "Software v0.4"
@@ -83,6 +84,7 @@ static void initFriendbox()
     changeScreenContext(SCREEN_CANVAS);
 }
 
+/* Download by sketch ID and then play from SD. */
 static void playSketchFromServer(const char *sketch_id)
 {
     char path[80];
@@ -107,7 +109,6 @@ static void uiLoopTask(void *)
         handleTouch();
         handleCanvasDraw();
         handleTouchUIUpdate();
-        // We just gotta run this on loop until we can set up interrupts.
         handleMenuButton(false);
         vTaskDelay(1);  // yield: 1 tick keeps the IDLE/WDT happy
     }
@@ -133,15 +134,17 @@ extern "C" void app_main(void)
     initMenuButton();
     initFriendbox();
 
-    // v4: streamed playback with interleaved per-frame audio. Single code path
-    // for all sizes — no PSRAM-full constraint.
+    setI2SVolume(25);
+    //playSketchFromServer("1779586962884"); // F12 v1
+    playSketchFromServer("1779589337528"); // F12 v2
+    //playSketchFromServer("1779589962966"); // F12 v3
+    playSketchFromServer("1779592535336"); // OW Gameplay
+    //playSketchFromServer("1776797823148"); // Troll Physics 2
     playSketchFromServer("1778969174678"); // Kitty Dithered 24fps
-    playSketchFromServer("1776836243916"); // Dithering Glitch Test
+    //playSketchFromServer("1776836243916"); // Dithering Glitch Test
     playSketchFromServer("1776835153465"); // Ben Troll Physics 24fps
-    //playSketchFromServer("1776836243916"); // Troll Physics 4 16fps
 
-    // The old Arduino setup/loop split is replaced by app_main + a pinned
-    // UI loop task. Core 0 runs the producer/decoder for animations; pin
+    // Core 0 runs the producer/decoder for animations; pin
     // the UI loop to core 1 so it shares the main-task core.
     xTaskCreatePinnedToCore(uiLoopTask, "ui_loop", 8192, nullptr, 1, nullptr, 1);
 }

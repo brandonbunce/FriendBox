@@ -28,7 +28,8 @@ public:
       auto cfg = _bus_instance.config();
       cfg.spi_host    = SPI2_HOST;
       cfg.spi_mode    = 0;
-      // LT7680 datasheet §17 (Electrical Characteristics): CLKSPI max = 50 MHz.
+      // LT7680 datasheet §17 (Electrical Characteristics): Specification CLKSPI max = 50 MHz, seems to work at 80Mhz.
+      // May cause a nightmare in the future.
       cfg.freq_write  = 80000000;
       cfg.freq_read   = 20000000;
       cfg.spi_3wire   = false;
@@ -140,6 +141,71 @@ public:
     }
     static_cast<lgfx::Panel_PCBA5981 *>(panel())->fillCircleGPU(
         (uint16_t)cx, (uint16_t)cy, (uint16_t)r, rgb565);
+  }
+  // Filled / outline rounded-rect via the GDE. Clipping rules match
+  // fillRectGPU: empty bounding box is dropped; left/top overhang would
+  // underflow the 13-bit coordinate registers so we fall back to the
+  // software path in that case (rare for UI buttons but matches the chip's
+  // datasheet constraint cleanly).
+  void fillRoundRectGPU(int32_t x, int32_t y, int32_t w, int32_t h,
+                        int32_t r, uint16_t rgb565)
+  {
+    if (w <= 0 || h <= 0 || r < 0) return;
+    int32_t sw = width();
+    int32_t sh = height();
+    if (x + w <= 0 || y + h <= 0 || x >= sw || y >= sh) return;
+    if (x < 0 || y < 0)
+    {
+      fillRoundRect(x, y, w, h, r, rgb565);
+      return;
+    }
+    int32_t x2 = x + w - 1;
+    int32_t y2 = y + h - 1;
+    if (x2 >= sw) x2 = sw - 1;
+    if (y2 >= sh) y2 = sh - 1;
+    // Datasheet §6.6 notes: w must exceed 2*rx+1, h must exceed 2*ry+1.
+    int32_t maxr_x = (x2 - x - 1) >> 1;
+    int32_t maxr_y = (y2 - y - 1) >> 1;
+    if (r > maxr_x) r = maxr_x;
+    if (r > maxr_y) r = maxr_y;
+    if (r <= 0)
+    {
+      static_cast<lgfx::Panel_PCBA5981 *>(panel())->fillRectGPU(
+          (uint16_t)x, (uint16_t)y, (uint16_t)x2, (uint16_t)y2, rgb565);
+      return;
+    }
+    static_cast<lgfx::Panel_PCBA5981 *>(panel())->fillRoundRectGPU(
+        (uint16_t)x, (uint16_t)y, (uint16_t)x2, (uint16_t)y2,
+        (uint16_t)r, (uint16_t)r, rgb565);
+  }
+  void drawRoundRectGPU(int32_t x, int32_t y, int32_t w, int32_t h,
+                        int32_t r, uint16_t rgb565)
+  {
+    if (w <= 0 || h <= 0 || r < 0) return;
+    int32_t sw = width();
+    int32_t sh = height();
+    if (x + w <= 0 || y + h <= 0 || x >= sw || y >= sh) return;
+    if (x < 0 || y < 0)
+    {
+      drawRoundRect(x, y, w, h, r, rgb565);
+      return;
+    }
+    int32_t x2 = x + w - 1;
+    int32_t y2 = y + h - 1;
+    if (x2 >= sw) x2 = sw - 1;
+    if (y2 >= sh) y2 = sh - 1;
+    int32_t maxr_x = (x2 - x - 1) >> 1;
+    int32_t maxr_y = (y2 - y - 1) >> 1;
+    if (r > maxr_x) r = maxr_x;
+    if (r > maxr_y) r = maxr_y;
+    if (r <= 0)
+    {
+      drawRect(x, y, w, h, rgb565);
+      return;
+    }
+    static_cast<lgfx::Panel_PCBA5981 *>(panel())->drawRoundRectGPU(
+        (uint16_t)x, (uint16_t)y, (uint16_t)x2, (uint16_t)y2,
+        (uint16_t)r, (uint16_t)r, rgb565);
   }
   void writeRawPixels(uint16_t x, uint16_t y, uint16_t w, const uint16_t* data)
   {

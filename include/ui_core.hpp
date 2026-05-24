@@ -117,6 +117,10 @@ void drawFriendboxLoadingScreen(const char *subtitle, int holdTimeMs = 0, const 
  * @param removeFromContext On top of redrawing over element, should we also remove it from the UI elements vector?
  */
 void cleanupUIOutOfContext(bool destroyElement = false);
+/** Install the LT7680 GPU draw callback on the button and push it into uiButtons.
+ *  Use this in place of `uiButtons.push_back(...)` for any new screen so that
+ *  the hardware rounded-rect kick replaces LovyanGFX's software arc fallback. */
+void registerUIButton(UIButton *btn);
 void changeScreenContext(screen_id_t targetScreen);
 /** Run this to check the target button for inputs, and register a logical press when the button is pressed according to mode.
  * @param targetButton The button we are checking for input on.

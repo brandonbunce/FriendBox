@@ -98,7 +98,7 @@ void initUIForScreenCanvasMenu()
                                                                   SCREEN_CANVAS_MENU_ACTION_BUTTON[col].fillColor, (int)draw_color_palette_text_color[currentDrawColorIndex],
                                                                   SCREEN_CANVAS_MENU_ACTION_BUTTON_LABEL[col], 2, 2);
         // push back pointer instead of unique object
-        uiButtons.push_back(&SCREEN_CANVAS_MENU_ACTION_BUTTON[col]);
+        registerUIButton(&SCREEN_CANVAS_MENU_ACTION_BUTTON[col]);
     }
 
     // Tool stack — bottom-right corner. Top button is the tool selector
@@ -124,7 +124,7 @@ void initUIForScreenCanvasMenu()
         SCREEN_CANVAS_MENU_ACTION_BUTTON[1].w, SCREEN_CANVAS_MENU_ACTION_BUTTON[1].h, TFT_WHITE,
         SCREEN_CANVAS_MENU_ACTION_BUTTON[1].fillColor, (int)draw_color_palette_text_color[currentDrawColorIndex],
         SCREEN_CANVAS_MENU_ACTION_BUTTON_LABEL[1], 2, 2);
-    uiButtons.push_back(&SCREEN_CANVAS_MENU_ACTION_BUTTON[1]);
+    registerUIButton(&SCREEN_CANVAS_MENU_ACTION_BUTTON[1]);
 
     // Init Tool Settings Placeholder (unimplemented — tap shows press feedback only)
     SCREEN_CANVAS_MENU_TOOL_SETTINGS_TRIGGER_BUTTON.x = toolStackX;
@@ -139,7 +139,7 @@ void initUIForScreenCanvasMenu()
         SCREEN_CANVAS_MENU_TOOL_SETTINGS_TRIGGER_BUTTON.w, SCREEN_CANVAS_MENU_TOOL_SETTINGS_TRIGGER_BUTTON.h, TFT_WHITE,
         SCREEN_CANVAS_MENU_TOOL_SETTINGS_TRIGGER_BUTTON.fillColor, (int)draw_color_palette_text_color[currentDrawColorIndex],
         "Settings", 2, 2);
-    uiButtons.push_back(&SCREEN_CANVAS_MENU_TOOL_SETTINGS_TRIGGER_BUTTON);
+    registerUIButton(&SCREEN_CANVAS_MENU_TOOL_SETTINGS_TRIGGER_BUTTON);
 
     // Init Color Buttons — 8x2 grid anchored to bottom-left.
     // Index 0..7 = top row, 8..15 = bottom row.
@@ -163,7 +163,7 @@ void initUIForScreenCanvasMenu()
         SCREEN_CANVAS_MENU_COLOR_BUTTON[i].button.initButtonUL(&tft, SCREEN_CANVAS_MENU_COLOR_BUTTON[i].x, SCREEN_CANVAS_MENU_COLOR_BUTTON[i].y, SCREEN_CANVAS_MENU_COLOR_BUTTON[i].w, SCREEN_CANVAS_MENU_COLOR_BUTTON[i].h,
                                                                  TFT_WHITE, SCREEN_CANVAS_MENU_COLOR_BUTTON[i].fillColor,
                                                                  (int)draw_color_palette_text_color[currentDrawColorIndex], "", 1, 1);
-        uiButtons.push_back(&SCREEN_CANVAS_MENU_COLOR_BUTTON[i]);
+        registerUIButton(&SCREEN_CANVAS_MENU_COLOR_BUTTON[i]);
     }
     // Init Menu Buttons
     for (int col = 0; col < MENU_DROPDOWN_BUTTON_COUNT; col++)
@@ -178,7 +178,7 @@ void initUIForScreenCanvasMenu()
         SCREEN_CANVAS_MENU_MENU_BUTTON[col].button.initButtonUL(&tft, SCREEN_CANVAS_MENU_MENU_BUTTON[col].x, SCREEN_CANVAS_MENU_MENU_BUTTON[col].y, SCREEN_CANVAS_MENU_MENU_BUTTON[col].w, SCREEN_CANVAS_MENU_MENU_BUTTON[col].h,
                                                                 TFT_WHITE, (int)draw_color_palette[currentDrawColorIndex], (int)draw_color_palette_text_color[currentDrawColorIndex],
                                                                 SCREEN_CANVAS_MENU_MENU_BUTTON_LABEL[col], 2, 2);
-        uiButtons.push_back(&SCREEN_CANVAS_MENU_MENU_BUTTON[col]);
+        registerUIButton(&SCREEN_CANVAS_MENU_MENU_BUTTON[col]);
     }
     // Init Tool Buttons — opens upward from the bottom-right tool selector.
     // Item 0 (Pencil) sits closest to the trigger; item 5 (Pattern) is highest.
@@ -196,7 +196,7 @@ void initUIForScreenCanvasMenu()
             SCREEN_CANVAS_MENU_TOOL_BUTTON[col].button.initButtonUL(&tft, SCREEN_CANVAS_MENU_TOOL_BUTTON[col].x, SCREEN_CANVAS_MENU_TOOL_BUTTON[col].y, SCREEN_CANVAS_MENU_TOOL_BUTTON[col].w, SCREEN_CANVAS_MENU_TOOL_BUTTON[col].h,
                                                                     TFT_WHITE, (int)draw_color_palette[currentDrawColorIndex], (int)draw_color_palette_text_color[currentDrawColorIndex],
                                                                     SCREEN_CANVAS_MENU_TOOL_BUTTON_LABEL[col], 2, 2);
-            uiButtons.push_back(&SCREEN_CANVAS_MENU_TOOL_BUTTON[col]);
+            registerUIButton(&SCREEN_CANVAS_MENU_TOOL_BUTTON[col]);
         }
     }
 
@@ -213,7 +213,7 @@ void initUIForScreenCanvasMenu()
         SCREEN_CANVAS_MENU_SAVE_BUTTON[col].button.initButtonUL(&tft, SCREEN_CANVAS_MENU_SAVE_BUTTON[col].x, SCREEN_CANVAS_MENU_SAVE_BUTTON[col].y, SCREEN_CANVAS_MENU_SAVE_BUTTON[col].w, SCREEN_CANVAS_MENU_SAVE_BUTTON[col].h,
                                                                 TFT_WHITE, (int)draw_color_palette[currentDrawColorIndex], (int)draw_color_palette_text_color[currentDrawColorIndex],
                                                                 SCREEN_CANVAS_MENU_SAVE_BUTTON_LABEL[col], 2, 2);
-        uiButtons.push_back(&SCREEN_CANVAS_MENU_SAVE_BUTTON[col]);
+        registerUIButton(&SCREEN_CANVAS_MENU_SAVE_BUTTON[col]);
     }
     // Init Load Buttons
     for (int col = 0; col < SLOT_DROPDOWN_BUTTON_COUNT; col++)
@@ -228,7 +228,7 @@ void initUIForScreenCanvasMenu()
         SCREEN_CANVAS_MENU_LOAD_BUTTON[col].button.initButtonUL(&tft, SCREEN_CANVAS_MENU_LOAD_BUTTON[col].x, SCREEN_CANVAS_MENU_LOAD_BUTTON[col].y, SCREEN_CANVAS_MENU_LOAD_BUTTON[col].w, SCREEN_CANVAS_MENU_LOAD_BUTTON[col].h,
                                                                 TFT_WHITE, (int)draw_color_palette[currentDrawColorIndex], (int)draw_color_palette_text_color[currentDrawColorIndex],
                                                                 SCREEN_CANVAS_MENU_LOAD_BUTTON_LABEL[col], 2, 2);
-        uiButtons.push_back(&SCREEN_CANVAS_MENU_LOAD_BUTTON[col]);
+        registerUIButton(&SCREEN_CANVAS_MENU_LOAD_BUTTON[col]);
     }
 }
 

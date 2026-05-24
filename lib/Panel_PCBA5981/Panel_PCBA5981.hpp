@@ -108,6 +108,32 @@ namespace lgfx
     // Read back the current MISA value from the chip.
     uint32_t readMainImageAddress(void);
 
+    // Read back MIW (Main Image Width, REG[24h-25h]) and CIW (Canvas Image
+    // Width, REG[54h-55h]). Both are set once in init() to the panel width
+    // and never touched again — drift implies a register-clobber bug.
+    uint16_t readMainImageWidth(void);
+    uint16_t readCanvasImageWidth(void);
+
+    // Read back MWULX (Main Window Upper-Left X, REG[26h-27h]) and MWULY
+    // (REG[28h-29h]). These define where the scanout window starts WITHIN
+    // the source buffer; set once at init to (0, 0). Drift to MWULX≠0 looks
+    // like a horizontal scroll (image shifts left, right edge wraps onto
+    // left) which matches the observed bug shape.
+    uint16_t readMainWindowUpperLeftX(void);
+    uint16_t readMainWindowUpperLeftY(void);
+
+    // Read a single chip register byte. Exposed so the diagnostic in
+    // display.cpp can dump a wider register set without growing this API
+    // for every individual register.
+    uint8_t  readRegByte(uint8_t reg) { return _read_reg_byte(reg); }
+
+    // Reassert MIW + CIW + MWULX/Y + the full-screen active window.
+    // Defensive: long playback runs were observed accumulating a stable
+    // ~48px horizontal shift that persists across files. MWULX/Y are never
+    // rewritten anywhere except init, so a stray write to those registers
+    // would produce exactly the observed symptom.
+    void reassertScanoutConfig(uint16_t width, uint16_t height);
+
     // Switch the SDRAM address that subsequent draws (and readRect) target.
     // Address must be 4-byte aligned. Use to direct ops into a frame slot
     // other than the displayed one (undo buffer, animation slot, etc.).
@@ -133,6 +159,14 @@ namespace lgfx
     // handled here.
     void fillCircleGPU(uint16_t cx, uint16_t cy, uint16_t r,
                              uint16_t rgb565);
+
+    // Filled / outline rounded-rectangle via the Geometric Drawing Engine
+    // (datasheet §6.6). Endpoints inclusive; rx/ry are the corner X/Y radii.
+    // Single REG[76h] kick - the chip rasterises in hardware.
+    void fillRoundRectGPU(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2,
+                          uint16_t rx, uint16_t ry, uint16_t rgb565);
+    void drawRoundRectGPU(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2,
+                          uint16_t rx, uint16_t ry, uint16_t rgb565);
 
     // Write a row of native RGB565 pixels directly to the canvas, bypassing
     // the LovyanGFX pixelcopy machinery. Use this for bulk transfers where
@@ -249,6 +283,9 @@ namespace lgfx
     uint8_t _read_status(void);
     bool    _wait_busy(uint32_t timeout_ms = 1000);
     void    _wait_sdram_ready(void);
+
+    void _round_rect_kick(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2,
+                          uint16_t rx, uint16_t ry, uint16_t rgb565, bool fill);
 
     void _set_active_window(uint16_t x, uint16_t y, uint16_t w, uint16_t h);
     void _start_memorywrite(void);

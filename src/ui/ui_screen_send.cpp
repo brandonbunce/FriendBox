@@ -26,7 +26,7 @@ void initUIForScreenSend()
                                                                 SCREEN_SEND_ADDRESSBOOK_BUTTON[col].w, SCREEN_SEND_ADDRESSBOOK_BUTTON[col].h, TFT_WHITE,
                                                                 SCREEN_SEND_ADDRESSBOOK_BUTTON[col].fillColor, (int)draw_color_palette_text_color[currentDrawColorIndex],
                                                                 "Working...", 2, 2);
-        uiButtons.push_back(&SCREEN_SEND_ADDRESSBOOK_BUTTON[col]);
+        registerUIButton(&SCREEN_SEND_ADDRESSBOOK_BUTTON[col]);
     }
 
     for (int col = 0; col < SCREEN_SEND_NAVI_BUTTON_COUNT; col++)
@@ -42,7 +42,7 @@ void initUIForScreenSend()
                                                          SCREEN_SEND_NAVI_BUTTON[col].w, SCREEN_SEND_NAVI_BUTTON[col].h, TFT_WHITE,
                                                          SCREEN_SEND_NAVI_BUTTON[col].fillColor, (int)draw_color_palette_text_color[currentDrawColorIndex],
                                                          SCREEN_SEND_NAVI_BUTTON_LABEL[col], 2, 2);
-        uiButtons.push_back(&SCREEN_SEND_NAVI_BUTTON[col]);
+        registerUIButton(&SCREEN_SEND_NAVI_BUTTON[col]);
     }
 }
 
