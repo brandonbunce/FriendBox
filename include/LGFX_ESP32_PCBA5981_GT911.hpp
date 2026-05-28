@@ -31,7 +31,7 @@ public:
       // LT7680 datasheet §17 (Electrical Characteristics): Specification CLKSPI max = 50 MHz, seems to work at 80Mhz.
       // May cause a nightmare in the future.
       cfg.freq_write  = 80000000;
-      cfg.freq_read   = 20000000;
+      cfg.freq_read   = 10000000;
       cfg.spi_3wire   = false;
       cfg.use_lock    = true;
       cfg.dma_channel = SPI_DMA_CH_AUTO;

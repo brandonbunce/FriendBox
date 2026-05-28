@@ -1460,6 +1460,18 @@ PlaybackResult playFboxAnimationFromSD(const char *path, uint32_t ring_bytes)
         PlaybackResult result;
         uint32_t iter = 0;
         while (true) {
+            // Per-iteration diagnostics for the horizontal-shift-bug hunt.
+            // (1) Heap log to spot leaks / DMA-cap fragmentation across iterations.
+            // (2) Register diff against init-time baseline: the FIRST iteration
+            //     that shows ANY diff is the smoking gun for the persistent
+            //     chip-state corruption we're chasing.
+            Serial.printf("[HEAP iter=%lu] internal_free=%u spiram_free=%u largest_dma=%u\n",
+                          (unsigned long)iter,
+                          (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                          (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+            displayDiagDiffRegistersAgainstBaseline((int)iter);
+
             result = playFboxAnimation(src);
             Serial.printf("[ANIM] %s loop iter=%lu result=%d (loop=%d)\n",
                           label, (unsigned long)iter, (int)result,

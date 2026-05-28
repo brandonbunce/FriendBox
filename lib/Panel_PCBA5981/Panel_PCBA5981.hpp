@@ -139,6 +139,37 @@ namespace lgfx
     // other than the displayed one (undo buffer, animation slot, etc.).
     void setCanvasAddress(uint32_t addr);
 
+    // Bulk read from chip SDRAM via CS-held continuous MRWDP reads.
+    // Per LT7680 datasheet §13.12 Note 2: "Continuous data read cycle can
+    // be accepted in bulk data read case." Existing _read_byte toggles CS
+    // per byte, which may not honour the continuous-read semantics and was
+    // observed returning STSR bit patterns instead of canvas memory under
+    // playback conditions. Use this for any diagnostic that needs trusted
+    // chip-SDRAM data. Reads `count` bytes from canvas (x, y) in row-major
+    // order into `dst`. Canvas must be set via setCanvasAddress beforehand.
+    void readCanvasBulk(uint16_t x, uint16_t y, uint16_t count, uint8_t *dst);
+
+    // One-shot validation that readCanvasBulk actually returns what we
+    // wrote. Writes 256 deterministic bytes (pattern[i] = i) to a scratch
+    // slot via the standard burst-write path, reads them back via
+    // readCanvasBulk, logs result. Use to verify the diagnostic probe is
+    // trustworthy before using it elsewhere. Caller supplies a scratch
+    // canvas slot address (e.g. LT7680_SLOT_UI) that's safe to overwrite.
+    void validateBulkRead(uint32_t scratch_canvas_addr);
+
+    // Snapshot every chip register that could affect MRWDP-write placement
+    // or scanout addressing into a fixed-layout array (currently 64 bytes).
+    // Used to compare baseline (captured at init) against runtime values
+    // to detect any register that gets clobbered after init. Returns the
+    // number of bytes written. Returns 0 if out_max < snapshot size.
+    size_t snapshotRegisters(uint8_t *out, size_t out_max);
+
+    // Register addresses captured by snapshotRegisters, in order. Exposed
+    // so the caller can pretty-print which REG[XXh] is at index N when a
+    // diff fires.
+    static const uint8_t *snapshotRegisterAddresses();
+    static size_t snapshotRegisterCount();
+
     // Hardware-accelerated rect copy between two SDRAM frame slots via the
     // BTE. Both slots are assumed to share the same image_width (panel width).
     // Use for backing-store snapshot/restore, undo capture, animation prep.

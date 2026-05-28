@@ -1,4 +1,4 @@
-# FriendBox — Agent Guide
+# FriendBox-Hardware — Agent Guide
 
 The FriendBox is desk appliance to to send animations, drawings, and more to friends. Creations called "sketches". When receive message, appliance will notify by flashing the screen, prompting to remove the lid and see message. It is extended by web application with a built in viewer, social media network called "SketchWall", and drawing tool that is built within FriendBox constraints..
 

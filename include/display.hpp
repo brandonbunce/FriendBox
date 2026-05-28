@@ -44,6 +44,14 @@ bool initDisplay();
 /** Read touch input as it becomes available and write to global variables.*/
 void handleTouch();
 
+/** Diagnostic: snapshot chip registers now and diff against the baseline
+ *  captured at the end of initDisplay(). Logs every register that has
+ *  changed since init, with both values. Call once per animation
+ *  iteration. The bug we're chasing is one-shot persistent — the first
+ *  iteration that shows ANY diff is the smoking gun. Safe to call
+ *  without an active startWrite(); manages its own transaction. */
+void displayDiagDiffRegistersAgainstBaseline(int iter_label);
+
 /** Write one scanline of raw RGB565 pixels directly to the display,
  *  bypassing the LovyanGFX pixelcopy machinery. Safe to call without an
  *  active tft.startWrite() — manages its own SPI transaction. */
