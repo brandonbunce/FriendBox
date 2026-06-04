@@ -112,9 +112,9 @@ v3 stored audio as a single ADPCM section after the last video frame. For synced
 v4 interleaves one ADPCM block per video frame:
 
 - **Naturally synced.** Producer reads chunks in stream order: pull audio block → decode → push to I2S StreamBuffer → decode video → post slot. By the time consumer dispatches frame 0, audio for frame 0 is already in the I2S DMA (or within its ~65 ms cushion).
-- **Streamable at any file size.** No PSRAM-full requirement, no `f_lseek` mid-playback. The `FboxSourceRingBuffered` PSRAM ring (2 MB default) plus SDIO 4-bit bandwidth (~4.7 MB/s effective) handles dithered 24 fps content with margin.
+- **Streamable at any file size.** No PSRAM-full requirement, no `f_lseek` mid-playback. The `FboxSourceRingBuffered` PSRAM ring (2 MB default) plus SDIO 4-bit bandwidth (~4.7 MB/s effective) handles dithered content at the 18 fps target with deep margin (pipeline has measured 24+ fps capability).
 - **Skip-frame resilient.** Audio block is independent of frame type; 'S' frames still carry audio so silent video doesn't silence audio.
-- **Slightly heavier per-frame overhead** — each frame carries a 4-byte ADPCM header. At 22050 Hz / 24 fps that's 4 / 463 ≈ 0.9% audio overhead vs v3's single block header per 1016 samples. Acceptable for the streaming win.
+- **Slightly heavier per-frame overhead** — each frame carries a 4-byte ADPCM header. At 22050 Hz / 18 fps that's 4 / 617 ≈ 0.6% audio overhead vs v3's single block header per 1016 samples. Acceptable for the streaming win.
 
 ---
 
@@ -124,7 +124,7 @@ P-frames carry an XOR delta; when the delta is uniformly zero (every pixel equal
 
 - **Client cost**: zero. Consumer just skips `displayAnimWriteFrame` for SKIP slots and counts the frame as drawn.
 - **File-size win**: substantial for any content with long held frames. Migration of 37 v3 files showed −0.5% to −90% size deltas (median −5%; the −90% cases were short loops with extended held intervals).
-- **SPI bandwidth**: a SKIP frame skips the LT7680 SPI burst (~30 ms at 24 fps) entirely. Frees core 1 to do other work or just idle.
+- **SPI bandwidth**: a SKIP frame skips the LT7680 SPI burst (~30 ms) entirely. Frees core 1 to do other work or just idle.
 
 The encoder still always emits an audio block for SKIP frames so audio sample alignment stays exact.
 
@@ -288,21 +288,29 @@ PSRAM during playback: slot ring (~690 KB) + RingBuffered storage (2 MB) + I2S S
 
 ## Performance ceiling and content complexity
 
-Post-SDIO + ring-buffered decoder, **all content shapes hit 24+ fps with headroom**. The binding constraint is the LT7680 SPI burst at 80 MHz (~30 ms/frame ≈ 33 fps theoretical), not source bandwidth.
+**Design target is 18 fps.** `FBOX_MAX_FPS = 18` in [`include/io.hpp`](../../include/io.hpp); files with `fps > 18` are rejected at header parse so consumer pacing, ADPCM block size, and I2S StreamBuffer sizing stay calibrated to one rate.
 
-| Content shape | Source bytes/frame | Source MB/s @ 24 fps | Headroom (SDIO ~4.7 MB/s) | Playback |
+**Why not 24 fps.** The LT7680 datasheet permits CLKSPI up to 50 MHz and the chip *appears* to operate at 80 MHz, but on this PCB the ESP32-S3 SPI peripheral can only drive the bus reliably at **40 MHz**. Running at 80 MHz produces a persistent SDRAM-corruption glitch (32-pixel right shift + 2–3 stale rows at top of canvas, sticky until reboot) — undefined behaviour outside the chip's spec window. The 40 MHz ceiling is enforced in [`include/LGFX_ESP32_PCBA5981_GT911.hpp`](../../include/LGFX_ESP32_PCBA5981_GT911.hpp). At 40 MHz the 230 KB SPI burst per frame takes ~46 ms, leaving only ~5 ms for everything else if the consumer ran at 24 fps (41.67 ms budget). 18 fps gives ~55.5 ms total budget with ~10 ms of comfortable slack after the SPI burst.
+
+Earlier docs reference "24.4 fps measured on dithered content" — those measurements were taken with the SPI bus mis-configured at 80 MHz and are not reproducible with the corruption fix. Historical record only.
+
+All previously-shipped "recovery" code (canvas read-back validation, register-snapshot diff, software reset on detected glitch) was deleted; it was masking a clock-rate violation.
+
+| Content shape | Source bytes/frame | Source MB/s @ 18 fps | Headroom (SDIO ~4.7 MB/s) | Playback |
 |---|---:|---:|---|---|
-| White background + sparse motion | ~1–5 KB | ~0.1 MB/s | 40× | 24 fps, SPI-bound |
-| Mixed content / typical sketches | ~10–40 KB | ~0.5 MB/s | 10× | 24 fps, SPI-bound |
-| Heavy motion, partial dither | ~40–80 KB | ~1.4 MB/s | 3× | 24 fps, SPI-bound |
-| Fully dithered, no compression headroom | ~115 KB + ~470 B audio | ~2.8 MB/s | 1.7× | **24.4 fps**, measured |
+| White background + sparse motion | ~1–5 KB | ~0.07 MB/s | 65× | 18 fps, SPI-bound |
+| Mixed content / typical sketches | ~10–40 KB | ~0.4 MB/s | 12× | 18 fps, SPI-bound |
+| Heavy motion, partial dither | ~40–80 KB | ~1.1 MB/s | 4× | 18 fps, SPI-bound |
+| Fully dithered, no compression headroom | ~115 KB + ~617 B audio | ~2.1 MB/s | 2.2× | 18 fps, SPI-bound |
 
-`FboxSourceRingBuffered` (the default SD playback path, see [ARCHITECTURE.md](../ARCHITECTURE.md#iocpp--iohpp)) pipelines SDIO with decode + SPI across both cores. Audio adds ~11 KB/s on top of video — invisible. Path validated to 24 fps on worst-case dithered content; mostly-static content is comfortably SPI-bound and additionally benefits from skip-frame compression.
+`FboxSourceRingBuffered` (the default SD playback path, see [ARCHITECTURE.md](../ARCHITECTURE.md#iocpp--iohpp)) pipelines SDIO with decode + SPI across both cores. Audio adds ~11 KB/s on top of video — invisible. Mostly-static content additionally benefits from skip-frame compression.
 
-Per-frame decode budget on core 0:
-- RLE + XOR (`decodeFrameTokens`): ~10 ms typical, ~20 ms worst case (pure-literal).
-- ADPCM block decode (`decodeOneBlock`): ~1 ms (~919 samples × ~1 µs each).
-- Total: ~11 ms typical, 21 ms worst case. Producer slack is ~30 ms/frame (while consumer is doing SPI on core 1). Comfortable margin.
+Per-frame decode budget on core 0 (at 18 fps, 55.5 ms total budget):
+- RLE + XOR (`decodeFrameTokens`): ~10 ms typical, ~25 ms worst case on dithered content (measured ~23 ms).
+- ADPCM block decode (`decodeOneBlock`): ~1.2 ms (~1225 samples × ~1 µs each at 22050 / 18).
+- Total: ~11 ms typical, ~26 ms worst case. Producer slack is ~25–30 ms/frame (while consumer is doing SPI on core 1). Comfortable margin.
+
+**Consumer pacing precision.** The consumer uses absolute-target tick math so frame N is dispatched at `anchor + N × TICK_HZ / fps` rather than a per-iteration `vTaskDelayUntil(prev_wake, 1000/fps)` increment. Truncated integer division would otherwise add ~1% cumulative drift (e.g. `1000/18 = 55` ms truncated from 55.555…, producing a measured 18.2 fps). On unpause, the anchor is reset so the active loop doesn't try to "catch up" to wall-clock time by bursting frames.
 
 ---
 
@@ -314,7 +322,7 @@ Streaming model:
 - Producer decodes one ADPCM block per video frame via `ImaAdpcmDecoder::decodeOneBlock`.
 - Producer calls `pushI2SSamples(pcm, samples_per_frame)` per frame — non-blocking with 5 ms timeout, drops on timeout (audio dropout beats video stall).
 - Writer task drains the PSRAM-backed StreamBuffer in 256-sample chunks, expands to stereo via a static scratch, calls `i2s_channel_write` with a 500 ms timeout.
-- StreamBuffer size ≈ `samples_per_frame × 12 × 2 bytes` ≈ 22 KB at 22050 Hz / 24 fps. Holds ~12 frames of cushion.
+- StreamBuffer size ≈ `samples_per_frame × 12 × 2 bytes` ≈ 29 KB at 22050 Hz / 18 fps. Holds ~12 frames of cushion (~670 ms at 18 fps).
 
 API:
 - `bool startI2SStreaming(uint32_t sample_rate, uint16_t samples_per_frame)` — installs channel, allocates buffer, spawns writer task.

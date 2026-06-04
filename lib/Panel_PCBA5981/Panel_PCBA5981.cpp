@@ -341,10 +341,15 @@ void Panel_PCBA5981::reassertScanoutConfig(uint16_t width, uint16_t height)
 {
     bool tr = _in_transaction;
     if (!tr) begin_transaction();
-    _write_reg16(0x24, width);     // MIW
-    _write_reg16(0x26, 0);         // MWULX
-    _write_reg16(0x28, 0);         // MWULY
-    _write_reg16(0x54, width);     // CIW
+    // Datasheet §5 Figure 5-4 — every scanout-side register the chip samples
+    // to display the main window. Rewriting these per page-flip means a stray
+    // clobber to any one of them only corrupts a single frame instead of
+    // becoming a persistent post-reset-only artefact (see horizontal-shift bug).
+    _write_reg16(0x24, width);     // MIW   (Figure 5-4 step 2)
+    _write_reg16(0x26, 0);         // MWULX (step 3)
+    _write_reg16(0x28, 0);         // MWULY (step 4)
+    _write_reg(0x10, 0x00);        // MPWCTR main-window color depth = 8bpp (step 5)
+    _write_reg16(0x54, width);     // CIW   (canvas, write-side)
     _set_active_window(0, 0, width, height);
     _flg_memorywrite = false;
     if (!tr) end_transaction();
@@ -358,140 +363,6 @@ void Panel_PCBA5981::setCanvasAddress(uint32_t addr)
     _canvas_addr = addr;        // mirror so BTE source/dest registers follow
     _flg_memorywrite = false;   // force active-window reload on next access
     if (!tr) end_transaction();
-}
-
-void Panel_PCBA5981::readCanvasBulk(uint16_t x, uint16_t y, uint16_t count, uint8_t *dst)
-{
-    if (count == 0) return;
-    bool tr = _in_transaction;
-    if (!tr) begin_transaction();
-
-    // Sets active window, REG[03h]=0, selects MRWDP, discards dummy first byte.
-    _start_memoryread(x, y, count, 1);
-
-    // CS-held continuous bulk read. After _start_memoryread the chip is in
-    // MRWDP-read mode with CS high; we re-assert CS, send one [0xC0]
-    // (A0=1, RW#=1 = data read) preamble, switch SPI hardware to MISO mode
-    // via beginRead, stream `count` bytes via readBytes, switch back via
-    // endRead, then deassert CS. Per LT7680 datasheet §13.12 Note 2,
-    // continuous data reads are accepted in this bulk mode.
-    _bus->wait();
-    cs_control(false);
-    _bus->writeCommand(0xC0, 8);
-    _bus->beginRead(0);
-    _bus->readBytes(dst, count, false);
-    _bus->endRead();
-    cs_control(true);
-
-    _flg_memorywrite = false;
-    if (!tr) end_transaction();
-}
-
-void Panel_PCBA5981::validateBulkRead(uint32_t scratch_canvas_addr)
-{
-    bool tr = _in_transaction;
-    if (!tr) begin_transaction();
-
-    uint32_t saved_canvas = _canvas_addr;
-
-    // Switch to scratch slot and burst-write a 256-byte deterministic pattern
-    // via the same MRWDP CS-held path used by writeRawFrame8bpp.
-    _write_reg32(0x50, scratch_canvas_addr);
-    _canvas_addr = scratch_canvas_addr;
-
-    _set_active_window(0, 0, 256, 1);
-
-    _bus->wait();
-    cs_control(true);
-    cs_control(false);
-    _bus->writeCommand((uint32_t)0x04 << 8, 16);   // select REG[04h] MRWDP
-    _bus->wait();
-    cs_control(true);
-
-    uint8_t pattern[256];
-    for (int i = 0; i < 256; i++) pattern[i] = (uint8_t)i;
-
-    static const uint8_t kPrefix = 0x80;
-    cs_control(false);
-    _bus->writeBytes(&kPrefix, 1, true, false);
-    _bus->wait();
-    _bus->writeBytes(pattern, 256, true, true);
-    _bus->wait();
-    cs_control(true);
-
-    // Wait FIFO empty before read-back.
-    auto t0 = millis();
-    while ((_read_status() & 0x40) == 0) {
-        if (millis() - t0 > 50) break;
-    }
-
-    // Read back via the new bulk-read primitive.
-    uint8_t readback[256];
-    readCanvasBulk(0, 0, 256, readback);
-
-    int matched = 0;
-    for (int i = 0; i < 256; i++) if (readback[i] == pattern[i]) matched++;
-
-    Serial.printf("[BULK READ VALIDATION] %d/256 bytes match (probe is %s)\n",
-                  matched, matched == 256 ? "TRUSTWORTHY" : "BROKEN");
-    if (matched != 256) {
-        Serial.print("[BULK READ VALIDATION] expected[0..15]:");
-        for (int i = 0; i < 16; i++) Serial.printf(" %02x", pattern[i]);
-        Serial.println();
-        Serial.print("[BULK READ VALIDATION] actual  [0..15]:");
-        for (int i = 0; i < 16; i++) Serial.printf(" %02x", readback[i]);
-        Serial.println();
-    }
-
-    // Restore canvas address.
-    _write_reg32(0x50, saved_canvas);
-    _canvas_addr = saved_canvas;
-    _flg_memorywrite = false;
-
-    if (!tr) end_transaction();
-}
-
-// Register addresses captured by snapshotRegisters, in fixed order. Indices
-// here are stable so the per-iteration diff can map index → REG[XXh].
-static const uint8_t k_snapshot_regs[] = {
-    0x02, 0x03, 0x10, 0x12,                          // MACR, ICR, MPWCTR, DPCR
-    0x0B, 0x0C, 0x0D,                                // INTEN, INTF, INT mask
-    0x14, 0x15, 0x16, 0x17, 0x18, 0x19,              // HDWR, HDWFTR, HNDR, HNDFTR, HSTR, HPWR
-    0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,              // VDHR(lo/hi), VNDR(lo/hi), VSTR, VPWR
-    0x20, 0x21, 0x22, 0x23,                          // MISA
-    0x24, 0x25,                                      // MIW
-    0x26, 0x27, 0x28, 0x29,                          // MWULX, MWULY
-    0x2A, 0x2B, 0x2C, 0x2D,                          // PIP PWDULX, PWDULY
-    0x2E, 0x2F, 0x30, 0x31,                          // PIP PISA
-    0x32, 0x33, 0x34, 0x35, 0x36, 0x37,              // PIP PIW, PWIULX, PWIULY
-    0x38, 0x39, 0x3A, 0x3B,                          // PIP PWW, PWH
-    0x50, 0x51, 0x52, 0x53,                          // CVSSA
-    0x54, 0x55,                                      // CIW
-    0x56, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D,  // AWULX, AWULY, AWW, AWH
-    0x5E,                                            // AW_COLOR
-    0x90, 0x91, 0x92,                                // BLT_CTRL0/1, BLT_COLR
-    0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC,              // DT_STR, DT_WTH
-    0xAD, 0xAE, 0xAF, 0xB0, 0xB1, 0xB2, 0xB3, 0xB4,  // DT_X, DT_Y, BLT_WTH, BLT_HIG
-    0xB5,                                            // APB_CTRL (alpha blending)
-    0xD2, 0xD3, 0xD4,                                // foreground R/G/B
-    0xE0, 0xE1, 0xE2, 0xE3, 0xE4,                    // SDRAM TMRD, SDRMD, SDR_REF(lo/hi), SDRCR
-    0xF0,                                            // power management
-};
-static constexpr size_t k_snapshot_count = sizeof(k_snapshot_regs) / sizeof(k_snapshot_regs[0]);
-
-const uint8_t *Panel_PCBA5981::snapshotRegisterAddresses() { return k_snapshot_regs; }
-size_t Panel_PCBA5981::snapshotRegisterCount() { return k_snapshot_count; }
-
-size_t Panel_PCBA5981::snapshotRegisters(uint8_t *out, size_t out_max)
-{
-    if (out_max < k_snapshot_count) return 0;
-    bool tr = _in_transaction;
-    if (!tr) begin_transaction();
-    for (size_t i = 0; i < k_snapshot_count; i++) {
-        out[i] = _read_reg_byte(k_snapshot_regs[i]);
-    }
-    if (!tr) end_transaction();
-    return k_snapshot_count;
 }
 
 // Filled rectangle via the Geometric Drawing Engine (datasheet pg. 145).
@@ -1305,8 +1176,32 @@ void Panel_PCBA5981::writeRawFrame8bpp(const uint8_t* clut8, uint32_t count)
     // REG[02h] MSD to natural order so the write cursor starts at top-left;
     // restore the rotation setting after the burst.
     _write_reg(0x02, 0x40);
+
+    // ---- Datasheet §5 Figure 5-3 Part 1 compliance ----
+    // Step 1 (CVSSA, REG[50h-53h]) is set by the caller via setCanvasAddress()
+    // in displayAnimFrameBegin(); we don't repeat it here.
+    // Step 2: Canvas Image Width. Reasserted defensively in case a prior
+    //         DMA / BTE path changed it.
+    _write_reg16(0x54, (uint16_t)timing.h_display);
+    // Step 3b: Active Window color depth (XY mode, 8bpp). The AW XY/W/H part
+    //          (step 3a) is written by _set_active_window inside
+    //          _start_memorywrite() below — datasheet step order is preserved
+    //          because REG[5Eh] doesn't overlap REG[56h-5Dh].
+    _write_reg(0x5E, 0x00);
+    // Step 4: Memory port destination = Image buffer (graphic mode, target SDRAM).
+    _write_reg(0x03, 0x00);
+    // Step 5: Wait for chip core idle (any prior BTE/GDE kick still draining)
+    //         before we start streaming. Bus->wait() only drains the host SPI
+    //         FIFO; it does not see the chip's internal state machine.
+    {
+        auto tb = millis();
+        while (_read_status() & 0x08) {
+            if (millis() - tb > 50) break;
+        }
+    }
+
     setWindow(0, 0, timing.h_display - 1, timing.v_display - 1);
-    _start_memorywrite();  // selects REG[04h]; CS ends HIGH
+    _start_memorywrite();  // Step 3a: AW XY/W/H; Step 6: select REG[04h]; CS ends HIGH
 
     // LT7680 burst write protocol:
     //   0x80 prefix (A0=1, RW#=0) enters streaming mode; all subsequent bytes
@@ -1333,93 +1228,14 @@ void Panel_PCBA5981::writeRawFrame8bpp(const uint8_t* clut8, uint32_t count)
         if (millis() - t0 > 50) break;   // safety: ~3 frame periods
     }
 
-    // One-shot bulk-read validation under playback conditions. Run after
-    // the FIRST burst this boot so we know whether the trustworthy-read
-    // primitive actually works in this context. Cursor liveness test was
-    // at init (chip idle); this is the same kind of check post-burst.
-    static bool bulk_read_validated = false;
-    if (!bulk_read_validated) {
-        bulk_read_validated = true;
-        // Use UI slot as scratch — never displayed during animation playback.
-        // Magic number 230400 = LT7680_SLOT_UI = TFT_HOR_RES * TFT_VER_RES * 1.
-        validateBulkRead(230400u);
-    }
-
-    // Canvas integrity check via the trusted bulk-read primitive. Fires on
-    // burst #1, then every 100 bursts. Reads rows 0/1/2 of the canvas back
-    // and compares to the corresponding rows of source. The bug we're
-    // chasing shows previous-frame data at the top of canvas; this check
-    // will catch it (row 0 won't match clut8[0..15]) and log enough hex
-    // bytes to fingerprint the offset. Guarded against small bursts that
-    // can't be safely indexed at clut8[960].
-    static uint32_t s_burst_count = 0;
-    s_burst_count++;
-    constexpr uint32_t W = 480;
-    if (count >= 3 * W + 16 && (s_burst_count == 1 || (s_burst_count % 100) == 0)) {
-        uint8_t chip[16 * 3];
-        readCanvasBulk(0, 0, 16, &chip[0]);
-        readCanvasBulk(0, 1, 16, &chip[16]);
-        readCanvasBulk(0, 2, 16, &chip[32]);
-        int m0 = 0, m1 = 0, m2 = 0;
-        for (int i = 0; i < 16; i++) {
-            if (chip[i]       == clut8[i])           m0++;
-            if (chip[16 + i]  == clut8[W + i])       m1++;
-            if (chip[32 + i]  == clut8[2 * W + i])   m2++;
-        }
-        Serial.printf("[CANVAS CHECK burst=%u] row0:%d/16 row1:%d/16 row2:%d/16\n",
-                      (unsigned)s_burst_count, m0, m1, m2);
-        // Only dump hex on SUBSTANTIAL mismatch (>=8 bytes wrong in any row).
-        // Single-byte noise (~1-3 bytes off) is chronic background and not
-        // the bug — dumping for it would drown the log.
-        if (m0 < 8 || m1 < 8 || m2 < 8) {
-            Serial.print("[CANVAS CHECK] chip[r0]:");
-            for (int i = 0; i < 16; i++) Serial.printf(" %02x", chip[i]);
-            Serial.print("  src[r0]:");
-            for (int i = 0; i < 16; i++) Serial.printf(" %02x", clut8[i]);
-            Serial.println();
-            Serial.print("[CANVAS CHECK] chip[r1]:");
-            for (int i = 0; i < 16; i++) Serial.printf(" %02x", chip[16 + i]);
-            Serial.print("  src[r1]:");
-            for (int i = 0; i < 16; i++) Serial.printf(" %02x", clut8[W + i]);
-            Serial.println();
-            Serial.print("[CANVAS CHECK] chip[r2]:");
-            for (int i = 0; i < 16; i++) Serial.printf(" %02x", chip[32 + i]);
-            Serial.print("  src[r2]:");
-            for (int i = 0; i < 16; i++) Serial.printf(" %02x", clut8[2 * W + i]);
-            Serial.println();
-
-            // Re-validate bulk-read RIGHT NOW (post-failure). Confirmed by
-            // last session: validation goes from 256/256 (clean) to 0-2/256
-            // (broken) at the moment the visible glitch fires. Chip's MRWDP
-            // port is wedged for both reads AND writes.
-            Serial.printf("[CANVAS CHECK] post-failure probe re-validation:\n");
-            validateBulkRead(230400u);
-
-            // STSR snapshot — if MRWDP reads are returning STSR-bit-patterns,
-            // their literal values should match STSR right now.
-            uint8_t stsr = _read_status();
-            uint8_t icr  = _read_reg_byte(0x03);
-            Serial.printf("[CANVAS CHECK] STSR=0x%02x ICR=0x%02x (chip data above had only bits in {0x00,0x04,0x40,0x44} which = STSR FIFO+DRAM-Ready bits)\n",
-                          stsr, icr);
-
-            // RECOVERY ATTEMPT: software reset. LT7680 §13.2 REG[00h] bit 0:
-            // "Software Reset only resets internal state machine. Configuration
-            // Registers value won't be reset." If MRWDP state machine is the
-            // wedged piece, this should clear it without losing our setup.
-            // Throttle to first 3 attempts per boot so we don't paper over the
-            // bug — we want to see if it returns.
-            static int recovery_attempts = 0;
-            if (recovery_attempts < 3) {
-                recovery_attempts++;
-                Serial.printf("[CANVAS CHECK] attempting software reset (REG[00h]=0x01), attempt %d/3:\n",
-                              recovery_attempts);
-                _write_reg(0x00, 0x01);  // software reset; auto-clears
-                delay(10);                // brief settle
-                Serial.printf("[CANVAS CHECK] post-software-reset probe re-validation:\n");
-                validateBulkRead(230400u);
-            }
-        }
-    }
+    // The historical "32-px right shift" glitch chased here was a symptom of
+    // running the ESP32 host SPI bus at 80 MHz, which exceeds the LT7680's
+    // safe receive window on this PCB and produces undefined SDRAM-write
+    // behavior. The fix is to clock the bus at ≤40 MHz — the ceiling
+    // documented in this driver. Recovery code (canvas read-back,
+    // post-failure register snapshot, software reset) was removed; it was
+    // papering over a clock-rate violation. See cfg.freq_write below /
+    // [docs/HARDWARE.md](docs/HARDWARE.md) for the limit.
 
     _write_reg(0x02, _reg02);  // restore rotation
     _flg_memorywrite = false;

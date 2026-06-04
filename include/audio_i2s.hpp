@@ -34,9 +34,13 @@ void stopI2SStreaming();
  *
  * pct: 0 = mute, 100 = unity gain. Internally stored as a Q15 multiplier.
  * Linear curve: perceived loudness drops sharply below ~50%. Swap to a log
- * curve if a UI volume slider feels too binary. Persists across
- * start/stopI2SStreaming() cycles; defaults to 100. */
+ * curve if a UI volume slider feels too binary.
+ *
+ * Persistence: setI2SVolume commits the value to NVS (key "i2s_vol" in the
+ * "Friendbox" namespace). Call loadI2SVolumeFromNVS() once at boot to apply
+ * the saved value before audio playback. Default if no saved value: 100. */
 void    setI2SVolume(uint8_t pct);
 uint8_t getI2SVolume(void);
+void    loadI2SVolumeFromNVS(void);
 
 #endif

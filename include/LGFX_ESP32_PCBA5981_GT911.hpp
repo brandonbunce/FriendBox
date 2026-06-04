@@ -28,10 +28,21 @@ public:
       auto cfg = _bus_instance.config();
       cfg.spi_host    = SPI2_HOST;
       cfg.spi_mode    = 0;
-      // LT7680 datasheet §17 (Electrical Characteristics): Specification CLKSPI max = 50 MHz, seems to work at 80Mhz.
-      // May cause a nightmare in the future.
-      cfg.freq_write  = 80000000;
-      cfg.freq_read   = 10000000;
+      // LT7680 datasheet §17 (Electrical Characteristics): CLKSPI max = 50 MHz.
+      // Empirically the ESP32-S3 SPI peripheral can only clock this PCB
+      // reliably at 40 MHz — running at 80 MHz appears to work for many frames
+      // but eventually trips a persistent SDRAM corruption symptom
+      // (~32-pixel right-shift + 2–3 stale rows at top of canvas, sticky
+      // until reboot). This is undefined behavior outside the chip's spec
+      // window and any code attempting to "recover" from it (software reset,
+      // canvas read-back, register-snapshot diff) was deleted — it was
+      // papering over a clock violation. The practical consequence is the
+      // pipeline cannot achieve the LT7680's theoretical SPI-burst ceiling
+      // of ~30 ms/frame (33 fps); at 40 MHz the burst is ~60 ms/frame, so
+      // the playback target is **18 fps** (FBOX_MAX_FPS). DO NOT raise this
+      // unless the underlying signal-integrity issue is fixed.
+      cfg.freq_write  = 40000000;
+      cfg.freq_read   = 40000000;
       cfg.spi_3wire   = false;
       cfg.use_lock    = true;
       cfg.dma_channel = SPI_DMA_CH_AUTO;

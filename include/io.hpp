@@ -32,6 +32,13 @@ extern NvsStore nvs;
 #define FBOX_HEADER_SIZE 512
 #define FBOX_VERSION     4
 
+// Playback target: 18 fps. The pipeline has measured up to 24.4 fps on
+// dithered content, but the design target is 18 fps and files with higher
+// fps are rejected at header parse so the consumer's pacing math + the
+// I2S StreamBuffer sizing stay calibrated to a single rate. Encoder should
+// downsample anything faster.
+#define FBOX_MAX_FPS     18
+
 // Frame type bytes — first byte of each frame chunk.
 #define FBOX_FRAME_I     0x49  // 'I' — intra: full RLE-encoded 4bpp pixels
 #define FBOX_FRAME_P     0x50  // 'P' — delta: RLE-encoded (current XOR previous)

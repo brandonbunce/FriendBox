@@ -8,16 +8,6 @@ uint16_t touchX, touchY, touchZ;
 uint16_t lastTouchX, lastTouchY;
 static unsigned long lastTouchTime = 0;
 
-// Register baseline captured at the end of initDisplay() for the bug
-// diagnostic: the FBOX horizontal-shift bug is a one-shot persistent chip
-// state corruption — once tripped, it stays until ESP32 reboot. Comparing
-// runtime register values against this baseline on every animation
-// iteration tells us which register flipped at the moment the bug appears.
-// Sized for the current snapshot count (~70 bytes); add slack.
-static uint8_t  g_reg_baseline[128];
-static size_t   g_reg_baseline_count = 0;
-static bool     g_reg_baseline_captured = false;
-
 static lgfx::Panel_PCBA5981* pcba_panel()
 {
     return static_cast<lgfx::Panel_PCBA5981*>(tft.getPanel());
@@ -35,49 +25,7 @@ bool initDisplay()
     tft.setBrightness(255);
     tft.setColorDepth(8);
     //tft.setFont(&DejaVu9);
-
-    // Capture chip-register baseline so the per-iteration diff can detect
-    // any register that gets clobbered during runtime.
-    tft.startWrite();
-    g_reg_baseline_count = pcba_panel()->snapshotRegisters(
-        g_reg_baseline, sizeof(g_reg_baseline));
-    tft.endWrite();
-    if (g_reg_baseline_count == 0) {
-        Serial.println("[REG BASELINE] FAILED — snapshot buffer too small");
-    } else {
-        g_reg_baseline_captured = true;
-        Serial.printf("[REG BASELINE] captured %u regs at init:", (unsigned)g_reg_baseline_count);
-        const uint8_t *addrs = lgfx::Panel_PCBA5981::snapshotRegisterAddresses();
-        for (size_t i = 0; i < g_reg_baseline_count; i++) {
-            Serial.printf(" %02x=%02x", addrs[i], g_reg_baseline[i]);
-        }
-        Serial.println();
-    }
-
     return true;
-}
-
-void displayDiagDiffRegistersAgainstBaseline(int iter_label)
-{
-    if (!g_reg_baseline_captured) return;
-    uint8_t current[sizeof(g_reg_baseline)];
-    tft.startWrite();
-    size_t n = pcba_panel()->snapshotRegisters(current, sizeof(current));
-    tft.endWrite();
-    if (n != g_reg_baseline_count) return;
-
-    const uint8_t *addrs = lgfx::Panel_PCBA5981::snapshotRegisterAddresses();
-    int diff_count = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (current[i] != g_reg_baseline[i]) {
-            if (diff_count == 0) {
-                Serial.printf("[REG DIFF iter=%d] ", iter_label);
-            }
-            Serial.printf("REG[%02xh]=0x%02x(was 0x%02x) ", addrs[i], current[i], g_reg_baseline[i]);
-            diff_count++;
-        }
-    }
-    if (diff_count > 0) Serial.println();
 }
 
 void displayWriteScanline(int x, int y, int w, const uint16_t* data)
@@ -124,6 +72,12 @@ void displayAnimFrameEnd()
     // scan position; suspected cause of an intermittent stable horizontal
     // shift where one of the four MISA bytes appeared to latch mid-scan.
     pcba_panel()->waitVSync();
+    // Datasheet §5 Figure 5-4: reassert every scanout-side register the chip
+    // samples (MIW, MWULX, MWULY, MPWCTR, CIW, AW) inside the VBlank window
+    // before MISA. Cheap insurance against the persistent horizontal-shift
+    // bug — if a stray transient flips one of these registers, the next frame
+    // resets it instead of carrying the corruption until reboot.
+    pcba_panel()->reassertScanoutConfig(TFT_HOR_RES, TFT_VER_RES);
     pcba_panel()->setMainImageAddress(back);
     _anim_slot_b = !_anim_slot_b;
     pcba_panel()->setCanvasAddress(LT7680_SLOT_CANVAS);

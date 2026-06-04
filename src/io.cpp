@@ -1066,8 +1066,15 @@ PlaybackResult playFboxAnimation(FboxSource &src)
                       hdr.frame_count, hdr.width, hdr.height);
         return PlaybackResult::DECODE_ERROR;
     }
+    if (hdr.fps > FBOX_MAX_FPS) {
+        Serial.printf("playFboxAnimation: fps %u exceeds cap %u — rejected\n",
+                      hdr.fps, FBOX_MAX_FPS);
+        return PlaybackResult::DECODE_ERROR;
+    }
     if (hdr.description[0]) Serial.printf("[ANIM] \"%s\"\n", hdr.description);
 
+    // Coarse pause-loop delay (paused branch uses relative pacing). Active
+    // pacing uses absolute-target math below — see prev_wake / pacing_anchor.
     const uint32_t frame_ms = hdr.fps > 0 ? 1000u / hdr.fps : 100u;
 
     // CRC seed (header bytes [64..511]) was computed by fboxReadHeader. All
@@ -1144,8 +1151,8 @@ PlaybackResult playFboxAnimation(FboxSource &src)
         // MALLOC_CAP_DMA is required for the SPI2 driver to read the slot
         // directly via DMA. Without it, IDF 5.x's spi_master falls back to
         // bouncing the buffer through internal RAM in chunks — adds ~11ms
-        // per 230 KB frame, the gap between theoretical (23ms @ 80 MHz)
-        // and the observed 34ms spi_avg.
+        // per 230 KB frame. At the 40 MHz bus ceiling (see LGFX panel
+        // config) the DMA-backed burst is ~46 ms/frame.
         slots[i].frame_buf = (uint8_t *)heap_caps_aligned_alloc(
             32, PIXEL_COUNT, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
         if (!slots[i].frame_buf) {
@@ -1244,7 +1251,15 @@ PlaybackResult playFboxAnimation(FboxSource &src)
     bool consumer_running = true;
     int slot_idx = 0;
     uint16_t frames_drawn = 0;
-    TickType_t prev_wake = xTaskGetTickCount();
+
+    // Precise pacing: track an absolute target tick = anchor + N × TICK_HZ / fps.
+    // Integer division truncates per-iteration (≤1-tick error), but the
+    // cumulative target is exact — no drift. Anchor is reset on unpause so
+    // pause time doesn't burn into a catch-up burst.
+    TickType_t pacing_anchor = xTaskGetTickCount();
+    uint32_t   pacing_index  = 0;       // frames completed since anchor reset
+    TickType_t prev_wake     = pacing_anchor;
+    bool       prev_paused   = false;
 
     // Reset per-call playback-menu state. loop_enabled persists.
     g_pbc.menu_open         = false;
@@ -1292,11 +1307,24 @@ PlaybackResult playFboxAnimation(FboxSource &src)
                 consumer_running = false;
                 break;
             }
-            vTaskDelayUntil(&prev_wake, pdMS_TO_TICKS(frame_ms));
+            // Pause uses relative delay — pacing index doesn't advance, so the
+            // active-branch absolute math stays clean. Marker so we can reset
+            // pacing_anchor on the next active iteration.
+            vTaskDelay(pdMS_TO_TICKS(frame_ms));
+            prev_paused = true;
             continue;
         }
 
         // ── NOT PAUSED: advance pipeline ─────────────────────────────────
+        if (prev_paused) {
+            // Just exited pause. Reset the pacing anchor so we don't try to
+            // catch up to "where we'd be if pause hadn't happened" by bursting
+            // frames as fast as possible.
+            pacing_anchor = xTaskGetTickCount();
+            pacing_index  = 0;
+            prev_wake     = pacing_anchor;
+            prev_paused   = false;
+        }
         uint32_t t_wait_start = millis();
         if (xSemaphoreTake(sem_ready, pdMS_TO_TICKS(2000)) != pdTRUE) {
             Serial.println("[ANIM] consumer timeout waiting for slot");
@@ -1375,8 +1403,21 @@ PlaybackResult playFboxAnimation(FboxSource &src)
             break;
         }
 
-        // Precise pacing.
-        vTaskDelayUntil(&prev_wake, pdMS_TO_TICKS(frame_ms));
+        // Precise pacing: target = anchor + (pacing_index + 1) × TICK_HZ / fps.
+        // Integer truncation per-iteration loses at most one tick; the absolute
+        // target is recomputed each frame so cumulative drift is zero.
+        pacing_index++;
+        TickType_t target = pacing_anchor +
+            (TickType_t)(((uint64_t)pacing_index * configTICK_RATE_HZ) / hdr.fps);
+        int32_t inc = (int32_t)(target - prev_wake);
+        if (inc > 0) {
+            vTaskDelayUntil(&prev_wake, (TickType_t)inc);
+        } else {
+            // We're behind schedule (decode/SPI overran or the producer was
+            // briefly starved). Skip the wait and advance prev_wake so the
+            // next iteration's math stays in sync with the anchor.
+            prev_wake = target;
+        }
     }
 
     // Release the held slot before tearing down semaphores.
@@ -1460,18 +1501,6 @@ PlaybackResult playFboxAnimationFromSD(const char *path, uint32_t ring_bytes)
         PlaybackResult result;
         uint32_t iter = 0;
         while (true) {
-            // Per-iteration diagnostics for the horizontal-shift-bug hunt.
-            // (1) Heap log to spot leaks / DMA-cap fragmentation across iterations.
-            // (2) Register diff against init-time baseline: the FIRST iteration
-            //     that shows ANY diff is the smoking gun for the persistent
-            //     chip-state corruption we're chasing.
-            Serial.printf("[HEAP iter=%lu] internal_free=%u spiram_free=%u largest_dma=%u\n",
-                          (unsigned long)iter,
-                          (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                          (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-                          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
-            displayDiagDiffRegistersAgainstBaseline((int)iter);
-
             result = playFboxAnimation(src);
             Serial.printf("[ANIM] %s loop iter=%lu result=%d (loop=%d)\n",
                           label, (unsigned long)iter, (int)result,

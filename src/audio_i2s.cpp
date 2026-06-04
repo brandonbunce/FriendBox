@@ -1,9 +1,17 @@
 #include "audio_i2s.hpp"
+#include "nvs_store.hpp"
 #include <driver/i2s_std.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/stream_buffer.h>
+
+// NVS key for persisted volume (uint8 stored as uint32 in the wrapper).
+// Namespace is "Friendbox" — same one io.cpp opens for other persisted state.
+static const char *NVS_NAMESPACE  = "Friendbox";
+static const char *NVS_VOLUME_KEY = "i2s_vol";
+
+extern NvsStore nvs;   // defined in io.cpp
 
 static i2s_chan_handle_t    s_tx_chan      = nullptr;
 static StreamBufferHandle_t s_stream       = nullptr;
@@ -228,19 +236,52 @@ void stopI2SStreaming()
     }
 }
 
+// Apply a volume percentage to the in-memory state. No NVS I/O. Shared by
+// setI2SVolume (UI / runtime changes) and loadI2SVolumeFromNVS (boot).
+//
+// UI slider exposes 0..100, but the NS4168 + speaker combo clips and the
+// case rattles above ~half gain. Cap the actual Q15 multiplier at 16384
+// (50% of unity). pct=100 → 16384, pct=50 → 8192, pct=0 → mute. The
+// returned getI2SVolume() still reports the UI percentage so the menu
+// highlight tracks the slider, not the underlying gain.
+static void apply_volume_pct(uint8_t pct)
+{
+    if (pct > 100) pct = 100;
+    s_volume_q15 = (uint16_t)((uint32_t)pct * 16384u / 100u);
+    s_volume_pct = pct;
+}
+
 void setI2SVolume(uint8_t pct)
 {
     if (pct > 100) pct = 100;
-    // UI slider exposes 0..100, but the NS4168 + speaker combo clips and the
-    // case rattles above ~half gain. Cap the actual Q15 multiplier at 16384
-    // (50% of unity). pct=100 → 16384, pct=50 → 8192, pct=0 → mute. The
-    // returned getI2SVolume() still reports the UI percentage so the menu
-    // highlight tracks the slider, not the underlying gain.
-    s_volume_q15 = (uint16_t)((uint32_t)pct * 16384u / 100u);
-    s_volume_pct = pct;
+    if (pct == s_volume_pct) return;     // no-op; skip NVS write
+    apply_volume_pct(pct);
+
+    // Persist to NVS so the value survives reboot. Open RW, write, close.
+    // Open/close per call keeps the surface simple; volume changes are
+    // user-driven (slider taps) so the rate is low and NVS wear-leveling
+    // handles the writes safely. If a UI ever drags continuously, debounce
+    // before calling this.
+    if (nvs.begin(NVS_NAMESPACE, /*read_only=*/false)) {
+        nvs.putUInt(NVS_VOLUME_KEY, (uint32_t)pct);
+        nvs.end();
+    }
 }
 
 uint8_t getI2SVolume(void)
 {
     return s_volume_pct;
+}
+
+void loadI2SVolumeFromNVS(void)
+{
+    uint8_t pct = 100;   // default if no saved value or NVS unavailable
+    if (nvs.begin(NVS_NAMESPACE, /*read_only=*/true)) {
+        uint32_t stored = nvs.getUInt(NVS_VOLUME_KEY, 100);
+        if (stored > 100) stored = 100;
+        pct = (uint8_t)stored;
+        nvs.end();
+    }
+    apply_volume_pct(pct);
+    printf("[I2S] volume restored from NVS: %u%%\n", (unsigned)pct);
 }

@@ -22,6 +22,7 @@
 #include "network.hpp"
 #include "ui_core.hpp"
 #include "audio_i2s.hpp"
+#include "audio_i2s.hpp"
 
 #define FRIENDBOX_DEBUG_MODE true
 #define FRIENDBOX_SOFTWARE_VERSION "Software v0.4"
@@ -74,6 +75,9 @@ static void initFriendbox()
     {
         drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 500, "Initializing NVS", "Done!");
     }
+    // Restore persisted I2S volume so startI2SStreaming picks up the user's
+    // last setting on first playback. Default 100% if no saved value.
+    loadI2SVolumeFromNVS();
     tft.fillScreen(draw_color_palette_text_color[currentDrawColorIndex]);
     if (couldInitCanvasFrameBuffer)
     {
@@ -135,9 +139,7 @@ extern "C" void app_main(void)
     initFriendbox();
 
     setI2SVolume(25);
-    //playSketchFromServer("1779586962884"); // F12 v1
-    playSketchFromServer("1779589337528"); // F12 v2
-    //playSketchFromServer("1779589962966"); // F12 v3
+    playSketchFromServer("1780336773819"); // F12 v2
     playSketchFromServer("1779592535336"); // OW Gameplay
     //playSketchFromServer("1776797823148"); // Troll Physics 2
     playSketchFromServer("1778969174678"); // Kitty Dithered 24fps
