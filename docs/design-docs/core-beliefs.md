@@ -10,7 +10,7 @@ The ESP32 has limited heap. The LT7680A SDRAM holds framebuffers, not arbitrary 
 
 ## Stable animations are a must.
 
-24fps animations must be possible with even the most intense .fbox file.
+18fps animations must be possible with even the most intense .fbox file.
 
 ## The palette is intentional, not a limitation
 

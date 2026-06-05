@@ -20,8 +20,8 @@
 #include "display.hpp"
 #include "io.hpp"
 #include "network.hpp"
-#include "ui_core.hpp"
-#include "audio_i2s.hpp"
+#include "ui.hpp"
+#include "lt_assets.hpp"
 #include "audio_i2s.hpp"
 
 #define FRIENDBOX_DEBUG_MODE true
@@ -31,8 +31,15 @@ static const char *TAG = "friendbox";
 
 static void initFriendbox()
 {
+    
     currentDrawColorIndex = 0 + (esp_random() % (15 - 0 + 1));
     initDisplay();
+    // Program LT7680 flash assets (one-time) + load glyphs into CGRAM, then show
+    // the boot splash as the first visible frame instead of SDRAM garbage.
+    ltAssetsInit();
+    ltShowSplash();
+    delay(900);
+    registerFriendboxScreens();   // must precede any changeScreenContext()
     drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 0, "Initializing SD");
     if (initSD(false))
     {
@@ -78,6 +85,7 @@ static void initFriendbox()
     // Restore persisted I2S volume so startI2SStreaming picks up the user's
     // last setting on first playback. Default 100% if no saved value.
     loadI2SVolumeFromNVS();
+    ui::initSfx();   // synthesize UI blips (lazy I2S session opens on first playSfx)
     tft.fillScreen(draw_color_palette_text_color[currentDrawColorIndex]);
     if (couldInitCanvasFrameBuffer)
     {
@@ -103,16 +111,15 @@ static void playSketchFromServer(const char *sketch_id)
             return;
         }
     }
-    drawFriendboxLoadingScreen("Playing Sketch", 250, sketch_id, "ENJOY :)");
+    drawFriendboxLoadingScreen("Playing Sketch", 0, sketch_id, "ENJOY :)");
     playFboxAnimationFromSD(path);
 }
 
 static void uiLoopTask(void *)
 {
     while (true) {
-        handleTouch();
-        handleCanvasDraw();
-        handleTouchUIUpdate();
+        handleTouch();          // GT911 -> touchX/Y/Z globals
+        ui::tick();             // custom tick (canvas paint) + widget dispatch + anim
         handleMenuButton(false);
         vTaskDelay(1);  // yield: 1 tick keeps the IDLE/WDT happy
     }

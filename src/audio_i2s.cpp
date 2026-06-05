@@ -251,21 +251,38 @@ static void apply_volume_pct(uint8_t pct)
     s_volume_pct = pct;
 }
 
+// Last value written to NVS. Lets commitI2SVolume() skip a redundant flash
+// write when a drag ends on the same value it started at.
+static uint8_t s_volume_pct_persisted = 100;
+
+static void persist_volume_pct(uint8_t pct)
+{
+    if (pct == s_volume_pct_persisted) return;
+    if (nvs.begin(NVS_NAMESPACE, /*read_only=*/false)) {
+        nvs.putUInt(NVS_VOLUME_KEY, (uint32_t)pct);
+        nvs.end();
+        s_volume_pct_persisted = pct;
+    }
+}
+
+void setI2SVolumeLive(uint8_t pct)
+{
+    if (pct > 100) pct = 100;
+    if (pct == s_volume_pct) return;
+    apply_volume_pct(pct);               // in-memory only; no flash I/O
+}
+
+void commitI2SVolume(void)
+{
+    persist_volume_pct(s_volume_pct);
+}
+
 void setI2SVolume(uint8_t pct)
 {
     if (pct > 100) pct = 100;
     if (pct == s_volume_pct) return;     // no-op; skip NVS write
     apply_volume_pct(pct);
-
-    // Persist to NVS so the value survives reboot. Open RW, write, close.
-    // Open/close per call keeps the surface simple; volume changes are
-    // user-driven (slider taps) so the rate is low and NVS wear-leveling
-    // handles the writes safely. If a UI ever drags continuously, debounce
-    // before calling this.
-    if (nvs.begin(NVS_NAMESPACE, /*read_only=*/false)) {
-        nvs.putUInt(NVS_VOLUME_KEY, (uint32_t)pct);
-        nvs.end();
-    }
+    persist_volume_pct(pct);             // one-shot change: persist immediately
 }
 
 uint8_t getI2SVolume(void)
@@ -283,5 +300,6 @@ void loadI2SVolumeFromNVS(void)
         nvs.end();
     }
     apply_volume_pct(pct);
+    s_volume_pct_persisted = pct;
     printf("[I2S] volume restored from NVS: %u%%\n", (unsigned)pct);
 }

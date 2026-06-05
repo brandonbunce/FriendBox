@@ -11,10 +11,15 @@ set(SRCS
     "fbox_source.cpp"
     "io.cpp"
     "network.cpp"
-    "ui/ui_core.cpp"
-    "ui/ui_screen_canvas_menu.cpp"
-    "ui/ui_screen_file_browser.cpp"
-    "ui/ui_screen_send.cpp"
+    "lt_assets.cpp"
+    "lt_glyph_data.cpp"
+    "lt_splash_data.cpp"
+    "ui/ui.cpp"
+    "ui/ui_widgets.cpp"
+    "ui/ui_anim.cpp"
+    "ui/ui_theme.cpp"
+    "ui/ui_sfx.cpp"
+    "ui/ui_screens.cpp"
 )
 
 set(INCLUDE_DIRS

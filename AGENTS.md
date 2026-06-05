@@ -1,10 +1,10 @@
 # FriendBox-Hardware — Agent Guide
 
-The FriendBox is desk appliance to to send animations, drawings, and more to friends. Creations called "sketches". When receive message, appliance will notify by flashing the screen, prompting to remove the lid and see message. It is extended by web application with a built in viewer, social media network called "SketchWall", and drawing tool that is built within FriendBox constraints..
+The FriendBox is a desk appliance to to send animations, drawings, and more to friends. Creations called "sketches". When receive message, appliance will notify by flashing the screen, prompting to remove the lid and see message. It is extended by web application with a built in viewer, a social media network called "SketchWall", and drawing tool that is built within FriendBox constraints..
 
-Technologically, FriendBox is an ESP32-S3 (N16R8) device with 480x480 LT7680-powered display, documented in `docs/`. Firmware is **ESP-IDF** (5.5.x) built under PlatformIO with `framework = espidf`; the Arduino layer was removed in the LT7680 migration. Because of limited hardware, expected that everything fully utilizes the ESP32, no room for wasted performance or memory-leaks. LovyanGFX (vendored under `components/LovyanGFX`) handles core functions for the display. If needed, expensive tasks offload via the REST API Python server.
+Technologically, FriendBox is an ESP32-S3 (N16R8) device with 480x480 LT7680-powered display, documented in `docs/`. Firmware is **ESP-IDF** (5.5.x) built under PlatformIO with `framework = espidf`; Because of limited hardware, expected that everything fully utilizes the ESP32, no room for wasted performance or memory-leaks. LovyanGFX (vendored under `components/LovyanGFX`) handles core functions for the display. If needed, expensive tasks offload via the REST API Python server.
 
-Being an appliance, stability/error handling is critical. FriendBox at release cannot have issues that would result in random crashes or lost data.
+Being an appliance, stability/error handling is critical. FriendBox cannot have issues that would result in random crashes or lost data.
 
 ---
 

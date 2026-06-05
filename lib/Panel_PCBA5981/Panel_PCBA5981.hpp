@@ -146,6 +146,14 @@ namespace lgfx
                     uint32_t dst_addr, uint16_t dst_x, uint16_t dst_y,
                     uint16_t w, uint16_t h);
 
+    // BTE Memory Copy with Opacity (Picture Mode). Whole-bitmap alpha blend:
+    //   DT = (S0 * alpha32/32) + (S1 * (1 - alpha32/32)),  alpha32 in 0..31.
+    // For a UI fade-in pass S0 = overlay slot, S1 = dst = background canvas.
+    void blitFramesAlpha(uint32_t s0_addr, uint16_t s0_x, uint16_t s0_y,
+                         uint32_t s1_addr, uint16_t s1_x, uint16_t s1_y,
+                         uint32_t dst_addr, uint16_t dst_x, uint16_t dst_y,
+                         uint16_t w, uint16_t h, uint8_t alpha32);
+
     // Filled-rectangle draw via the Geometric Drawing Engine (datasheet
     // section 6.3). Single REG[76h] kick - the chip rasterises in hardware,
     // no per-pixel SPI traffic. Coordinates are in canvas pixel space.
@@ -225,6 +233,30 @@ namespace lgfx
                        uint32_t canvas_dst_addr,
                        uint16_t dst_x, uint16_t dst_y,
                        uint16_t block_w, uint16_t block_h);
+
+    // ---- User-defined character (UCG) glyph engine (datasheet §8.2) ------
+    // Point the character generator at the CGRAM base address in SDRAM
+    // (REG[DBh-DEh] CGRAM_STR). Glyph N then lives at base + N*bytes_per_glyph.
+    void cgramSetStart(uint32_t cgram_addr);
+
+    // Upload raw UCG dot-matrix bytes into CGRAM (SDRAM) via the linear-mode
+    // memory-write port — the "Initialize CGRAM from MCU" path. cgram_addr is
+    // an absolute SDRAM byte address (CVSSA is forced to 0 for the write).
+    void cgramWrite(uint32_t cgram_addr, const uint8_t* data, uint32_t len);
+
+    // Read CGRAM bytes back (diagnostic).
+    void cgramRead(uint32_t cgram_addr, uint8_t* buf, uint32_t len);
+
+    // Render one user-defined character at (x,y) into the current canvas slot
+    // using the hardware text engine. fg565/bg565 are the glyph + background
+    // colors; heightCode 0/1/2 = 16/24/32-dot; enlarge 1..4; transparentBg
+    // skips the background fill so the glyph composites over canvas content.
+    // charSource: CCR0 bits[7:6] — 0=internal CGROM, 1=external CGROM,
+    // 2=user-defined CGRAM (default for UCG glyphs).
+    void drawChar(uint16_t code, uint16_t x, uint16_t y,
+                  uint16_t fg565, uint16_t bg565,
+                  uint8_t heightCode, uint8_t enlarge, bool transparentBg,
+                  uint8_t charSource = 2);
     // ---------------------------------------------------------------------
 
     color_depth_t setColorDepth(color_depth_t depth) override;
@@ -288,6 +320,7 @@ namespace lgfx
                           uint16_t rx, uint16_t ry, uint16_t rgb565, bool fill);
 
     void _set_active_window(uint16_t x, uint16_t y, uint16_t w, uint16_t h);
+    void _cgram_write_row(uint32_t dst_addr, const uint8_t* data, uint16_t n);
     void _start_memorywrite(void);
     void _set_forecolor(uint32_t rawcolor);
     void _write_pixel16(uint16_t color);  // converts RGB565→RGB332 index, writes 1 byte (8bpp)

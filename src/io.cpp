@@ -1,7 +1,8 @@
 #include "io.hpp"
 #include "display.hpp"
 #include "canvas.hpp"
-#include "ui_core.hpp"
+#include "ui.hpp"
+#include "lt_assets.hpp"
 #include "audio.hpp"
 #include "audio_i2s.hpp"
 #include "fbox_source.hpp"
@@ -685,26 +686,37 @@ constexpr int PB_BTN_H   = 50;
 constexpr int PB_BTN_GAP = 8;
 constexpr int PB_BTN_Y0  = 70;
 
-constexpr int     PB_VOL_COUNT             = 5;
-constexpr uint8_t PB_VOL_PCT[PB_VOL_COUNT] = {0, 25, 50, 75, 100};
-constexpr int     PB_VOL_GAP               = 4;
-constexpr int     PB_VOL_H                 = 50;
-// 5 buttons share PB_BTN_W: each is (W - 4 gaps) / 5 = 44 px.
-constexpr int     PB_VOL_W                 = (PB_BTN_W - (PB_VOL_COUNT - 1) * PB_VOL_GAP) / PB_VOL_COUNT;
-// Placed below the 4 main buttons with a slightly bigger gap as a separator.
-constexpr int     PB_VOL_Y                 = PB_BTN_Y0 + PB_BTN_COUNT * (PB_BTN_H + PB_BTN_GAP) + PB_BTN_GAP;
+// Continuous volume slider (replaces the old 5 discrete presets). Tap anywhere
+// on the track to jump, or hold and drag to sweep 0..100%. Spans PB_BTN_W and
+// sits below the 4 main buttons with a slightly bigger gap as a separator.
+constexpr int PB_VOL_X      = PB_BTN_X;
+constexpr int PB_VOL_W      = PB_BTN_W;
+constexpr int PB_VOL_H      = 60;
+constexpr int PB_VOL_Y      = PB_BTN_Y0 + PB_BTN_COUNT * (PB_BTN_H + PB_BTN_GAP) + PB_BTN_GAP;
+constexpr int PB_VOL_KNOB_R = 18;            // knob radius
+constexpr int PB_VOL_TRACK_Y= PB_VOL_Y + 40; // track centerline (label sits above)
 
 // Hit-test result encoding:
 //   PB_HIT_OUTSIDE → tap was outside the menu rect (caller dismisses)
 //   PB_HIT_NONE    → tap inside the menu but not on any button (no-op)
 //   0..3           → main button index (PB_BTN_*)
-//   PB_HIT_VOL0+i  → volume preset index i (indexes PB_VOL_PCT)
+//   PB_HIT_VOL     → tap landed on the volume slider
 constexpr int PB_HIT_OUTSIDE = -2;
 constexpr int PB_HIT_NONE    = -1;
-constexpr int PB_HIT_VOL0    = 10;
+constexpr int PB_HIT_VOL     = 10;
 
 static inline int pb_btn_y(int idx) { return PB_BTN_Y0 + idx * (PB_BTN_H + PB_BTN_GAP); }
-static inline int pb_vol_x(int idx) { return PB_BTN_X  + idx * (PB_VOL_W + PB_VOL_GAP); }
+
+// Map a touch X within the slider rect to a 0..100 volume percentage.
+static uint8_t pb_vol_pct_from_x(int x)
+{
+    int lo = PB_VOL_X + PB_VOL_KNOB_R;
+    int hi = PB_VOL_X + PB_VOL_W - PB_VOL_KNOB_R;
+    int span = hi - lo; if (span < 1) span = 1;
+    if (x < lo) x = lo;
+    if (x > hi) x = hi;
+    return (uint8_t)((x - lo) * 100 / span);
+}
 
 static bool pb_rect_contains(int rx, int ry, int rw, int rh, int x, int y)
 {
@@ -717,9 +729,7 @@ static int pb_hit_test(int x, int y)
     for (int i = 0; i < PB_BTN_COUNT; i++) {
         if (pb_rect_contains(PB_BTN_X, pb_btn_y(i), PB_BTN_W, PB_BTN_H, x, y)) return i;
     }
-    for (int i = 0; i < PB_VOL_COUNT; i++) {
-        if (pb_rect_contains(pb_vol_x(i), PB_VOL_Y, PB_VOL_W, PB_VOL_H, x, y)) return PB_HIT_VOL0 + i;
-    }
+    if (pb_rect_contains(PB_VOL_X, PB_VOL_Y, PB_VOL_W, PB_VOL_H, x, y)) return PB_HIT_VOL;
     return PB_HIT_NONE;
 }
 
@@ -727,8 +737,8 @@ static void pb_handle_tap(PlaybackController &c, int x, int y)
 {
     int hit = pb_hit_test(x, y);
     if (hit == PB_HIT_OUTSIDE) { c.menu_open = false; return; }
-    if (hit >= PB_HIT_VOL0 && hit < PB_HIT_VOL0 + PB_VOL_COUNT) {
-        setI2SVolume(PB_VOL_PCT[hit - PB_HIT_VOL0]);
+    if (hit == PB_HIT_VOL) {
+        setI2SVolumeLive(pb_vol_pct_from_x(x));   // persisted on touch release
         return;
     }
     switch (hit) {
@@ -753,12 +763,53 @@ struct PlaybackMenuCache {
 };
 static PlaybackMenuCache g_pbc_cache = { /*valid=*/false, false, false, 0 };
 
+// Volume is intentionally NOT in the signature: dragging the slider changes it
+// nearly every frame, and a full re-render (4 buttons + software text labels)
+// per frame would stall the SPI burst. Volume changes take the cheap
+// slider-only repaint path in pb_draw_menu() instead.
 static bool pb_cache_matches(const PlaybackController &c)
 {
     return g_pbc_cache.valid
         && g_pbc_cache.paused       == c.paused
-        && g_pbc_cache.loop_enabled == c.loop_enabled
-        && g_pbc_cache.volume_pct   == getI2SVolume();
+        && g_pbc_cache.loop_enabled == c.loop_enabled;
+}
+
+// Draw just the volume slider into the current canvas (assumed pointed at
+// SLOT_MENU, inside an active startWrite). Self-contained: fills its own dark
+// panel first so it can be re-run in isolation to repaint on a volume change
+// without touching the (expensive) button labels. Records the rendered pct.
+static void pb_draw_slider()
+{
+    const uint8_t cur_pct = getI2SVolume();
+    int lo  = PB_VOL_X + PB_VOL_KNOB_R;
+    int hi  = PB_VOL_X + PB_VOL_W - PB_VOL_KNOB_R;
+    int span = hi - lo; if (span < 1) span = 1;
+    int knobX  = lo + cur_pct * span / 100;
+    int trackH = 10;
+
+    tft.fillRoundRectGPU(PB_VOL_X-1, PB_VOL_Y-1, PB_VOL_W+2, PB_VOL_H+2, 10, 0xFFFF); // white border
+    tft.fillRoundRectGPU(PB_VOL_X,   PB_VOL_Y,   PB_VOL_W,   PB_VOL_H,   10, 0x0000); // black fill
+
+    tft.setTextSize(2);
+    tft.setTextColor(0xFFFF, 0x0000);
+    char vlabel[12];
+    snprintf(vlabel, sizeof(vlabel), "Vol %u%%", (unsigned)cur_pct);
+    tft.drawCenterString(vlabel, PB_VOL_X + PB_VOL_W / 2, PB_VOL_Y + 6);
+
+    tft.fillRoundRectGPU(lo, PB_VOL_TRACK_Y - trackH/2, span, trackH, trackH/2, 0x4208); // gray track
+    if (knobX - lo > 0)
+        tft.fillRoundRectGPU(lo, PB_VOL_TRACK_Y - trackH/2, knobX - lo, trackH, trackH/2, 0x07E0); // green fill
+    tft.fillCircleGPU(knobX, PB_VOL_TRACK_Y, PB_VOL_KNOB_R, 0x07E0); // green knob
+
+    g_pbc_cache.volume_pct = cur_pct;
+}
+
+// Repaint ONLY the slider region of the cache. Used on the volume-drag fast
+// path so a slider sweep never re-renders the 4 button labels.
+static void pb_render_slider_to_cache()
+{
+    displayAnimCanvasToMenuCache();
+    pb_draw_slider();
 }
 
 // Render the menu chrome + all buttons into LT7680_SLOT_MENU. The 20+
@@ -775,48 +826,40 @@ static void pb_render_menu_to_cache(const PlaybackController &c)
     tft.fillRoundRectGPU(PB_MENU_X-2, PB_MENU_Y-2, PB_MENU_W+4, PB_MENU_H+4, 10, 0xFFFF);  // white border
     tft.fillRoundRectGPU(PB_MENU_X,   PB_MENU_Y,   PB_MENU_W,   PB_MENU_H,   10, 0x0000);  // black fill
 
-    const char *labels[PB_BTN_COUNT];
-    labels[PB_BTN_STOP]    = "Stop";
-    labels[PB_BTN_PAUSE]   = c.paused        ? "Resume" : "Pause";
-    labels[PB_BTN_LOOP]    = c.loop_enabled  ? "Loop: On" : "Loop: Off";
-    labels[PB_BTN_RESTART] = "Restart";
+    // Hardware UCG glyphs instead of software text labels (faster repaint, and
+    // the pause button reflects play/pause state). Loop on/off is conveyed by
+    // the green vs gray button fill.
+    int glyphs[PB_BTN_COUNT];
+    glyphs[PB_BTN_STOP]    = GLYPH_STOP;
+    glyphs[PB_BTN_PAUSE]   = c.paused ? GLYPH_PLAY : GLYPH_PAUSE;
+    glyphs[PB_BTN_LOOP]    = GLYPH_LOOP;
+    glyphs[PB_BTN_RESTART] = GLYPH_CHEV_L;
 
-    tft.setTextSize(2);
     for (int i = 0; i < PB_BTN_COUNT; i++) {
         int by = pb_btn_y(i);
         uint16_t fill   = (i == PB_BTN_LOOP && c.loop_enabled) ? 0x07E0 /*green*/ : 0x4208 /*dark gray*/;
         uint16_t border = 0xFFFF;
         tft.fillRoundRectGPU(PB_BTN_X-1, by-1, PB_BTN_W+2, PB_BTN_H+2, 10, border);
         tft.fillRoundRectGPU(PB_BTN_X,   by,   PB_BTN_W,   PB_BTN_H,   10, fill);
-        tft.setTextColor(0xFFFF, fill);
-        tft.drawCenterString(labels[i], PB_BTN_X + PB_BTN_W / 2, by + PB_BTN_H / 2 - 8);
+        ui::glyphCentered(glyphs[i], PB_BTN_X, by, PB_BTN_W, PB_BTN_H, 0xFFFF, 1);
     }
 
-    const uint8_t cur_pct = getI2SVolume();
-    tft.setTextSize(1);
-    for (int i = 0; i < PB_VOL_COUNT; i++) {
-        int bx = pb_vol_x(i);
-        uint16_t fill   = (PB_VOL_PCT[i] == cur_pct) ? 0x07E0 /*green*/ : 0x4208 /*dark gray*/;
-        uint16_t border = 0xFFFF;
-        tft.fillRoundRectGPU(bx-1, PB_VOL_Y-1, PB_VOL_W+2, PB_VOL_H+2, 8, border);
-        tft.fillRoundRectGPU(bx,   PB_VOL_Y,   PB_VOL_W,   PB_VOL_H,   8, fill);
-        tft.setTextColor(0xFFFF, fill);
-        char label[8];
-        snprintf(label, sizeof(label), "%u", (unsigned)PB_VOL_PCT[i]);
-        tft.drawCenterString(label, bx + PB_VOL_W / 2, PB_VOL_Y + PB_VOL_H / 2 - 4);
-    }
+    pb_draw_slider();
 
     g_pbc_cache.valid        = true;
     g_pbc_cache.paused       = c.paused;
     g_pbc_cache.loop_enabled = c.loop_enabled;
-    g_pbc_cache.volume_pct   = cur_pct;
 }
 
 // Composite the cached menu onto the current back ANIM buffer. Refreshes
 // the cache first iff the state-affecting fields changed.
 static void pb_draw_menu(const PlaybackController &c)
 {
-    if (!pb_cache_matches(c)) pb_render_menu_to_cache(c);
+    if (!pb_cache_matches(c)) {
+        pb_render_menu_to_cache(c);                 // full: buttons + slider
+    } else if (g_pbc_cache.volume_pct != getI2SVolume()) {
+        pb_render_slider_to_cache();                // cheap: slider region only
+    }
     displayAnimBlitMenuToBack(PB_MENU_X - 2, PB_MENU_Y - 2,
                               PB_MENU_W + 4, PB_MENU_H + 4);
 }
@@ -1229,6 +1272,9 @@ PlaybackResult playFboxAnimation(FboxSource &src)
     // I2S consumer running yet (writer task spawned but DMA hasn't started
     // draining audio until its first write). Audio start vs frame 0 is
     // within the ~65 ms DMA cushion either way.
+    // The UI keeps a lazy persistent I2S session for SFX; playback owns the
+    // channel exclusively, so release the UI session before installing ours.
+    ui::suspendSfxSession();
     bool audio_streaming = false;
     if (hdr.audio_sample_rate > 0 && hdr.audio_samples_per_frame > 0) {
         audio_streaming = startI2SStreaming(hdr.audio_sample_rate,
@@ -1287,10 +1333,18 @@ PlaybackResult playFboxAnimation(FboxSource &src)
 
             handleTouch();
             bool cur = (touchZ > 0);
+            bool wasOpen = g_pbc.menu_open;
             if (cur && !last_touch_active) {
                 if (!g_pbc.menu_open) g_pbc.menu_open = true;
                 else                  pb_handle_tap(g_pbc, touchX, touchY);
             }
+            // Continuous volume drag (only when the menu was already open, so
+            // the gesture that opens the menu can't also fling the volume).
+            // Live (no flash) per frame; persist once on release.
+            if (cur && wasOpen &&
+                pb_rect_contains(PB_VOL_X, PB_VOL_Y, PB_VOL_W, PB_VOL_H, touchX, touchY))
+                setI2SVolumeLive(pb_vol_pct_from_x(touchX));
+            if (!cur && last_touch_active) commitI2SVolume();
             last_touch_active = cur;
 
             if (g_pbc.stop_requested) {
@@ -1382,10 +1436,18 @@ PlaybackResult playFboxAnimation(FboxSource &src)
         // Touch + menu dispatch.
         handleTouch();
         bool cur = (touchZ > 0);
+        bool wasOpen = g_pbc.menu_open;
         if (cur && !last_touch_active) {
             if (!g_pbc.menu_open) g_pbc.menu_open = true;
             else                  pb_handle_tap(g_pbc, touchX, touchY);
         }
+        // Continuous volume drag (only when the menu was already open, so the
+        // gesture that opens the menu can't also fling the volume). Live (no
+        // flash) per frame; persist once on release.
+        if (cur && wasOpen &&
+            pb_rect_contains(PB_VOL_X, PB_VOL_Y, PB_VOL_W, PB_VOL_H, touchX, touchY))
+            setI2SVolumeLive(pb_vol_pct_from_x(touchX));
+        if (!cur && last_touch_active) commitI2SVolume();
         last_touch_active = cur;
 
         if (g_pbc.stop_requested) {

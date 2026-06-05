@@ -4,11 +4,9 @@ Known structural problems that should be resolved before significant feature wor
 
 ---
 
-## ~~[MEDIUM] ui_core.cpp screen extraction~~ — DONE
+## ~~[MEDIUM] ui_core.cpp screen extraction~~ — SUPERSEDED by the `ui::` rewrite
 
-`SCREEN_SEND` → `src/ui/ui_screen_send.cpp/.hpp` ✓  
-`SCREEN_FILE_BROWSER` → `src/ui/ui_screen_file_browser.cpp/.hpp` ✓  
-`ui_core.cpp` now holds only the dispatcher, registry, `UIButton` plumbing, `cleanupUIOutOfContext`, `drawSketchPreview`, and `drawFriendboxLoadingScreen`. No further extraction needed unless `drawSketchPreview` / `drawFriendboxLoadingScreen` grow substantially.
+The legacy `ui_core` / `UIButton` / `ScreenHandlers` monolith was fully replaced by the `ui::` builder framework (retained store, deferred layout, declarative screen records). `ui_core.cpp/hpp` and the `ui_screen_*` files were deleted. See [design-docs/ui-framework.md](../design-docs/ui-framework.md).
 
 ---
 

@@ -42,7 +42,7 @@ public:
       // the playback target is **18 fps** (FBOX_MAX_FPS). DO NOT raise this
       // unless the underlying signal-integrity issue is fixed.
       cfg.freq_write  = 40000000;
-      cfg.freq_read   = 40000000;
+      cfg.freq_read   = 20000000;
       cfg.spi_3wire   = false;
       cfg.use_lock    = true;
       cfg.dma_channel = SPI_DMA_CH_AUTO;
@@ -244,5 +244,34 @@ public:
   {
     static_cast<lgfx::Panel_PCBA5981 *>(panel())->blitFrames(
         src_addr, src_x, src_y, dst_addr, dst_x, dst_y, w, h);
+  }
+  void blitFramesAlpha(uint32_t s0_addr, uint16_t s0_x, uint16_t s0_y,
+                       uint32_t s1_addr, uint16_t s1_x, uint16_t s1_y,
+                       uint32_t dst_addr, uint16_t dst_x, uint16_t dst_y,
+                       uint16_t w, uint16_t h, uint8_t alpha32)
+  {
+    static_cast<lgfx::Panel_PCBA5981 *>(panel())->blitFramesAlpha(
+        s0_addr, s0_x, s0_y, s1_addr, s1_x, s1_y,
+        dst_addr, dst_x, dst_y, w, h, alpha32);
+  }
+  void cgramSetStart(uint32_t cgram_addr)
+  {
+    static_cast<lgfx::Panel_PCBA5981 *>(panel())->cgramSetStart(cgram_addr);
+  }
+  void cgramWrite(uint32_t cgram_addr, const uint8_t* data, uint32_t len)
+  {
+    static_cast<lgfx::Panel_PCBA5981 *>(panel())->cgramWrite(cgram_addr, data, len);
+  }
+  void cgramRead(uint32_t cgram_addr, uint8_t* buf, uint32_t len)
+  {
+    static_cast<lgfx::Panel_PCBA5981 *>(panel())->cgramRead(cgram_addr, buf, len);
+  }
+  void drawCharGPU(uint16_t code, uint16_t x, uint16_t y,
+                   uint16_t fg565, uint16_t bg565,
+                   uint8_t heightCode, uint8_t enlarge, bool transparentBg,
+                   uint8_t charSource = 2)
+  {
+    static_cast<lgfx::Panel_PCBA5981 *>(panel())->drawChar(
+        code, x, y, fg565, bg565, heightCode, enlarge, transparentBg, charSource);
   }
 };

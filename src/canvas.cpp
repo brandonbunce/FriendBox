@@ -1,6 +1,6 @@
 #include "canvas.hpp"
 #include "display.hpp"
-#include "ui_core.hpp"
+#include "ui.hpp"
 #include "idf_compat.hpp"
 
 #include <algorithm>

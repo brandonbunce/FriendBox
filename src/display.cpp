@@ -204,6 +204,42 @@ void displayFlashPlayFrame(uint16_t frame_idx, uint16_t w, uint16_t h)
     use_b = !use_b;
 }
 
+void displayFlashRead(uint32_t addr, uint8_t* buf, uint32_t len)
+{
+    tft.startWrite();
+    // flashReadBytes takes uint16_t len; chunk for larger reads.
+    uint32_t done = 0;
+    while (done < len) {
+        uint16_t chunk = (uint16_t)((len - done) > 4096 ? 4096 : (len - done));
+        pcba_panel()->flashReadBytes(addr + done, buf + done, chunk);
+        done += chunk;
+    }
+    tft.endWrite();
+}
+
+void displayFlashProgram(uint32_t addr, const uint8_t* data, uint32_t len)
+{
+    tft.startWrite();
+    uint32_t done = 0;
+    while (done < len) {
+        // Programs must not cross a 256-byte page boundary; clamp each chunk to
+        // the remaining bytes in the current page.
+        uint32_t page_left = 256 - ((addr + done) & 0xFF);
+        uint16_t chunk = (uint16_t)((len - done) < page_left ? (len - done) : page_left);
+        pcba_panel()->flashPageProgram(addr + done, data + done, chunk);
+        done += chunk;
+    }
+    tft.endWrite();
+}
+
+void displayDmaFlashToCanvas(uint32_t flash_addr, uint16_t w, uint16_t h,
+                             uint32_t canvas_addr, uint16_t dst_x, uint16_t dst_y)
+{
+    tft.startWrite();
+    pcba_panel()->dmaFlashBlock(flash_addr, w, canvas_addr, dst_x, dst_y, w, h);
+    tft.endWrite();
+}
+
 void handleTouch()
 {
     uint16_t localTouchX, localTouchY;

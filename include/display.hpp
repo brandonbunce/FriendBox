@@ -31,6 +31,10 @@
 // ~22 GPU rounded-rect kicks + 9 software text labels (~10–20 ms) to a
 // single ~100 KB BTE copy (~1–2 ms).
 #define LT7680_SLOT_MENU   (LT7680_FRAME_BYTES * 4u)
+// User-defined character (UCG) glyph storage in LT7680 SDRAM, above the 5
+// display slots (top ≈ FRAME_BYTES*5 ≈ 0x119400). 64 KB-aligned with a small
+// [23:16] byte so the linear-mode address registers can't be bit-masked.
+#define LT7680_CGRAM_ADDR  0x00140000u
 
 extern LGFX tft;
 /* Tracks touch location in current tick- If Z>0 then touching. */
@@ -108,5 +112,14 @@ void displayFlashWriteFrame(uint16_t frame_idx, uint16_t w, uint16_t h,
  *  display to show it.  The drawing canvas (SLOT_CANVAS) is unaffected.
  *  frame_idx / w / h must match what was passed to displayFlashWriteFrame. */
 void displayFlashPlayFrame(uint16_t frame_idx, uint16_t w, uint16_t h);
+
+/** Raw serial-flash read into a host buffer (wraps the panel SPI master). */
+void displayFlashRead(uint32_t addr, uint8_t* buf, uint32_t len);
+/** Page-program arbitrary bytes to serial flash (≤256-B pages, auto-chunked).
+ *  Caller must erase the target sectors first (displayFlashErase). */
+void displayFlashProgram(uint32_t addr, const uint8_t* data, uint32_t len);
+/** DMA an 8bpp w×h block from serial flash into an SDRAM canvas slot at (x,y). */
+void displayDmaFlashToCanvas(uint32_t flash_addr, uint16_t w, uint16_t h,
+                             uint32_t canvas_addr, uint16_t dst_x, uint16_t dst_y);
 
 #endif

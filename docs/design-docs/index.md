@@ -6,6 +6,7 @@ Design documents record *why* decisions were made, not just what was built. Chec
 |---|---|---|
 | [core-beliefs.md](core-beliefs.md) | Active | Operating principles for this codebase |
 | [fbox-codec.md](fbox-codec.md) | Active | FBOX binary format spec, decode recipe, and design decisions |
+| [ui-framework.md](ui-framework.md) | Active | `ui::` builder framework: retained store, slot model, theming, SFX, animation, glyphs |
 
 ---
 

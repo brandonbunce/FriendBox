@@ -5,7 +5,7 @@ FriendBox firmware is organized into five logical layers. Each layer depends onl
 ```
 ┌─────────────────────────────────────────────┐
 │                 Application                  │
-│  src/ui/ — ui_core dispatcher + per-screen   │
+│  src/ui/ — ui:: builder framework + screens  │
 ├─────────────────────────────────────────────┤
 │                Feature modules               │
 │  canvas.cpp      network.cpp    io.cpp        │
@@ -30,8 +30,8 @@ Boot sequencer. Initializes hardware in order: display → SD → canvas → tou
 ### display.cpp / display.hpp
 - Owns the global `tft` (LovyanGFX) object
 - Manages a 10-item touch input queue (`touchX`, `touchY`, `touchZ`)
-- SDRAM slot allocation: slot 0 = live canvas framebuffer, slot 1 = UI backing store
-- Resolution constant: `DISPLAY_WIDTH` / `DISPLAY_HEIGHT` = 480
+- SDRAM slot allocation (`include/display.hpp`): `SLOT_CANVAS` (live sketch), `SLOT_UI` (overlay/menus), `SLOT_ANIM`/`SLOT_ANIM_B` (playback + UI enter-anim scratch), `SLOT_MENU` (playback-menu cache), and `LT7680_CGRAM_ADDR` (UCG glyph storage)
+- Resolution constant: `TFT_HOR_RES` / `TFT_VER_RES` = 480
 
 ### canvas.cpp / canvas.hpp
 - Defines the 16-color palette (RGB565 values, sourced from androidarts.com)
@@ -39,103 +39,59 @@ Boot sequencer. Initializes hardware in order: display → SD → canvas → tou
 - Tools: pencil, fill (flood), dither, palette picker
 - Color quantization: nearest-neighbor lookup for off-palette input colors
 
-### src/ui/ — UI layer
+### src/ui/ — UI layer (`ui::` framework)
 
-The UI is a registry-dispatched state machine. Each `screen_id_t` value maps to a row in the `screens[]` table (`ui_core.cpp`); the table holds function pointers for that screen's lifecycle hooks. The dispatcher in `ui_core.cpp` is the only place that knows about screen transitions; per-screen files only implement their own behavior.
-
-**`ScreenHandlers` (`include/ui_core.hpp`)** — one row per screen:
-
-| Field | Purpose |
-|---|---|
-| `name` | Debug-printable screen name (also surfaces via `getUIContextName`) |
-| `implemented` | `false` → `changeScreenContext` logs critical and aborts the transition |
-| `preservePriorUI` | `true` → on entry, hide buttons but don't destroy them (used by transient overlays like `SCREEN_SYSTEM_MESSAGE`) |
-| `init()` | Build LGFX_Buttons. Called lazily, dedupe-guarded by `checkIfUIIsInitialized` |
-| `onEnter()` | Pre-draw side effects on every transition into the screen — e.g. reset page, clear dropdown |
-| `draw()` | Paint the screen |
-| `handleTouch()` | Per-frame touch dispatch, called from `handleTouchUIUpdate` |
-| `activeSubcontext()` | Optional. Returns the screen's currently active subcontext (open dropdown, sort mode, etc.). `cleanupUIOutOfContext` queries this to decide which buttons to hide. See "Subcontexts" below. |
-
-Any hook may be `nullptr` to skip that phase.
-
-**`changeScreenContext(target)` flow:**
-1. If `target` is unimplemented → log and return.
-2. Cleanup prior buttons. `cleanupUIOutOfContext(destroy)` is called with `destroy = false` if `preservePriorUI`, transitioning within the canvas family (`SCREEN_CANVAS` ↔ `SCREEN_CANVAS_MENU`), or re-entering the same screen; otherwise `destroy = true`.
-3. `currentScreen = target`.
-4. `init()` (skipped if already initialized) → `onEnter()` → `draw()`.
-
-**Per-frame loop:** `handleTouchUIUpdate()` → `screens[currentScreen].handleTouch()`.
-
-**Adding a new screen:** create `src/ui/ui_screen_<name>.cpp/.hpp` exposing whichever hooks the screen needs, `#include` the header from `ui_core.cpp`, and add one row to `screens[]`.
-
-**Subcontexts** — for sub-states within a screen (open dropdowns, sort modes, confirm dialogs, etc.):
-
-`UIButton::subcontext` is a screen-private `int`. **Convention:** `0` = always visible on this screen; any nonzero value means the button is only visible when the screen's `activeSubcontext()` returns the same value.
-
-`cleanupUIOutOfContext` filters buttons using:
+A screen is authored with imperative builder calls that run once on entry and populate a **retained** widget store; the framework owns layout, theming, draw, touch hit-test, and animation from there. No hand pixel-math, no per-element `setColor`/`drawButton`, no `switch(col)` touch blocks. Full rationale in [design-docs/ui-framework.md](design-docs/ui-framework.md).
 
 ```cpp
-int activeSub = screens[currentScreen].activeSubcontext
-                    ? screens[currentScreen].activeSubcontext()
-                    : 0;
-// hide button if (button.screenContext != currentScreen)
-//             || (button.subcontext != 0 && button.subcontext != activeSub)
+static void buildSend() {
+    ui::beginScreen();
+    ui::beginColumn(16, 12);
+        ui::label("Send to");
+        ui::list(s_friends, &s_sendPage, 4, sendPickFriend).sfx(ui::SFX_CONFIRM);
+        ui::beginRow(10);
+            ui::button("Canvas", sendToCanvasMenu).sfx(ui::SFX_CLOSE).size(150, 48);
+            ui::button("Refresh", sendRefresh);
+        ui::endRow();
+    ui::endColumn();
+    ui::endScreen();
+}
+ui::registerScreen(SCREEN_SEND, { "SCREEN_SEND", buildSend, nullptr, false,
+                                  SLOT_OVERLAY_CLEAN, ANIM_SLIDE_FROM_RIGHT });
 ```
 
-`ui_core` never knows the type behind the int. Each screen module:
+**Core pieces:**
+- **Retained store** — `ui::Widget g_widgets[96]` lives in **PSRAM** (not BSS: internal SRAM is reserved for the fbox decoder's 115 KB `frame_4bpp`). Builders return a `ui::Ref` whose chained modifiers (`.sfx().color().size().sub().anim().value()`) mutate the widget.
+- **Deferred layout** — builders append to an ordered op list; `endScreen()` replays it through a `Column`/`Row`/`Grid` container stack to resolve every rect (so chained `.size()` works).
+- **Dispatch** — `screen_id_t` and `changeScreenContext()` are kept (so `canvas.cpp`/`io.cpp` only swapped an include). Screens are `ui::Screen` records registered via `ui::registerScreen`; widgetless screens (e.g. `SCREEN_CANVAS`) use the optional `customTick` hook to run `handleCanvasDraw`.
+- **Frame tick** — `ui::tick()` (from `uiLoopTask`) runs the custom tick, dispatches touch honoring `subcontext` visibility, advances animations, and repaints only changed widgets. **Idle = zero redraws.**
+- **Theming** — `ui_theme.cpp` derives `accentColor()`/`onAccentColor()` from the existing `currentDrawColorIndex`; `ui::setAccent()` re-themes the live screen.
+- **SFX** — `ui_sfx.cpp` synthesizes blips at boot and plays them through a lazy/persistent UI I2S session; fbox playback calls `ui::suspendSfxSession()` around its own I2S use.
+- **Animation** — `ui_anim.cpp` composes the new screen into `SLOT_ANIM` (scratch) and reveals it onto the shown slot: slide/bounce via `blitFrames`, fade via `blitFramesAlpha` (BTE opacity).
 
-1. Defines its own enum (e.g. `dropdown_id_t` in `ui_screen_canvas_menu.hpp`) with the `_NONE = 0` value.
-2. Holds the current value as a file-static variable (e.g. `static dropdown_id_t currentDropdown`).
-3. Casts to `int` when assigning `UIButton::subcontext` and when implementing `activeSubcontext()`.
-4. Registers `activeSubcontext` in its row of `screens[]`.
+**SDRAM slot model.** Menus draw to `SLOT_UI` and leave the sketch in `SLOT_CANVAS` untouched, so closing a menu is a single `setMainImageAddress` flip. `ui::Screen.slotMode`:
 
-Cross-screen references are not allowed — a screen's subcontext type is private to that screen's module. New subcontext shapes (sort modes for SEND, confirm dialogs, etc.) ship as new enums in their owning screen's header without touching `ui_core`.
-
-Worked example — `ui_screen_canvas_menu`:
-
-```cpp
-// ui_screen_canvas_menu.hpp
-typedef enum { DROPDOWN_NONE = 0, DROPDOWN_MENU, DROPDOWN_TOOLS, DROPDOWN_SAVE, DROPDOWN_LOAD } dropdown_id_t;
-int activeSubcontextScreenCanvasMenu();
-
-// ui_screen_canvas_menu.cpp
-static dropdown_id_t currentDropdown = DROPDOWN_NONE;
-int activeSubcontextScreenCanvasMenu() { return (int)currentDropdown; }
-// ...later in init...
-SCREEN_CANVAS_MENU_TOOL_BUTTON[col].subcontext = (int)DROPDOWN_TOOLS;
-```
-
-**SDRAM slot model — overlay screens**
-
-The LT7680 holds multiple full-screen frames in SDRAM and can scan out from any of them. Two slots are reserved for the UI layer (addresses defined in `include/display.hpp`):
-
-| Slot | Address | Purpose |
+| Mode | Behavior | Used by |
 |---|---|---|
-| `LT7680_SLOT_CANVAS` | 0 | Canonical drawing surface. The user's sketch lives here untouched. |
-| `LT7680_SLOT_UI` | `LT7680_FRAME_BYTES` | Overlay backing store. Snapshot target for screens that need to paint *on top of* the canvas without destroying it. |
+| `SLOT_DIRECT` | Draw onto `SLOT_CANVAS`; never cleared on entry | `SCREEN_CANVAS` |
+| `SLOT_OVERLAY_CLEAN` | Fresh menu on `SLOT_UI` over a bg fill; sketch preserved | `SEND`, `FILE_BROWSER`, `CANVAS_MENU` |
+| `SLOT_OVERLAY_SNAPSHOT` | Copy sketch into `SLOT_UI`, draw over it | (available) |
 
-`SCREEN_CANVAS_MENU` uses the slot pair to overlay seamlessly on `SCREEN_CANVAS`:
+Slot addresses are in `include/display.hpp` (`LT7680_SLOT_CANVAS/_UI/_ANIM/_ANIM_B/_MENU`, plus `LT7680_CGRAM_ADDR` for glyph storage).
 
-1. `onEnterScreenCanvasMenu` — `tft.blitFrames(SLOT_CANVAS → SLOT_UI)` (BTE-accelerated, no SPI per pixel), then aims both `setCanvasAddress` and `setMainImageAddress` at `SLOT_UI`.
-2. `drawScreenCanvasMenu` paints buttons onto `SLOT_UI`, leaving `SLOT_CANVAS` untouched.
-3. On exit (entering `SCREEN_CANVAS`), `onEnterScreenCanvas` calls `useCanvasSlot()` which switches both addresses back to `SLOT_CANVAS`. The overlay disappears in one register write — no fillRect, no redraw of the canvas.
+**Subcontexts** — a widget's `subcontext` int gates visibility: `0` = always visible; nonzero means visible only when `ui::activeSubcontext()` matches. `ui::setSubcontext(n)` opens/closes a sub-state (dropdowns, confirm states) and repaints.
 
-Other screens (`SEND`, `FILE_BROWSER`) call `useCanvasSlot()` in their `onEnter` to defensively snap back to slot 0 when arriving from a slot-1 screen. Their `draw` functions repaint the entire screen, so any leftover content on the active slot is irrelevant — but keeping the address consistent avoids subtle bugs in future code that assumes "draws land on slot 0."
+**Glyphs + boot splash** — `lt_assets.*` programs embedded UCG glyphs into LT7680 flash, loads them into CGRAM (written one 64-byte row at a time — see the design doc's "CGRAM write gotcha"), and renders them with the hardware character engine (`drawChar` / `ui::glyphCentered`); a host-driven splash shows at boot. See [design-docs/ui-framework.md](design-docs/ui-framework.md).
 
-`SCREEN_SYSTEM_MESSAGE` intentionally leaves the slot pair alone (no `onEnter`) so transient overlays like `drawFriendboxLoadingScreen` paint over whatever is currently displayed. This means a loading screen triggered from `SCREEN_CANVAS` would scribble on `SLOT_CANVAS` — currently safe because no flow does that (loading screens are only triggered from CANVAS_MENU dropdowns and from SEND), but worth knowing if you add a new caller.
-
-**Other UI primitives:**
-- `UIButton`: position + `screenContext` + `subcontext` + fill color; wraps `LGFX_Button`. Action modes: `ACT_ON_PRESS`, `ACT_ON_HOVER_AND_RELEASE`, `ACT_ON_RELEASE`.
-- `UIList`: paginated friend and file lists.
-
-**Current modules:**
+**Modules:**
 
 | Module | Owns |
 |---|---|
-| `ui_core.cpp/hpp` | Dispatcher, registry, `UIButton` plumbing, `cleanupUIOutOfContext`, `drawSketchPreview`, `drawFriendboxLoadingScreen`, `useCanvasSlot` |
-| `ui_screen_canvas_menu.cpp/hpp` | Dropdown layout, action/color/tool/save/load buttons, dropdown render |
-| `ui_screen_send.cpp/hpp` | Address book buttons, friend list pagination, send trigger |
-| `ui_screen_file_browser.cpp/hpp` | File list buttons, pagination, file selection → `loadSketchFromSD` |
+| `include/ui.hpp`, `ui.cpp` | Public API, store, deferred layout, dispatch, `tick()`, touch, salvaged `drawFriendboxLoadingScreen`/`sketchPreview` |
+| `ui_widgets.cpp` | Per-type draw + hit-test (button/label/slider/checkbox/list) |
+| `ui_anim.cpp`, `ui_theme.cpp`, `ui_sfx.cpp` | Animation, accent theming, procedural SFX |
+| `ui_screens.cpp` | The FriendBox screens + `registerFriendboxScreens()` |
+| `lt_assets.*`, `lt_glyph_data.cpp`, `lt_splash_data.cpp` | Flash glyph/splash assets, CGRAM loader, glyph render |
 
 ### io.cpp / io.hpp
 
@@ -260,11 +216,11 @@ Low-level driver for the LT7680A graphics accelerator driving the ST7701S MIPI p
 ## Data flow: touch → render
 
 ```
-GT911 hardware interrupt
-  → display.cpp touch queue (ring buffer, 10 items)
-    → ui_core.cpp::handleTouchUIUpdate reads touchX/Y/Z
-      → screens[currentScreen].handleTouch() dispatch
-        → per-screen UIButton hit-test
-          → action callback (draw, menu open, file load, etc.)
-            → tft.drawPixel / tft.fillRect / SDRAM slot restore
+GT911 polled in uiLoopTask (handleTouch → touchX/Y/Z globals)
+  → ui::tick()
+    → screen customTick (e.g. handleCanvasDraw on SCREEN_CANVAS)
+    → touch dispatch over the retained widget store (subcontext-filtered hit-test)
+      → widget callback (changeScreenContext, file load, setDrawColor, slider value, …)
+        → playSfx(widget.sfx) + repaint only the changed widget
+    → advance enter-animation (BTE reveal from SLOT_ANIM), if any
 ```

@@ -43,4 +43,12 @@ void    setI2SVolume(uint8_t pct);
 uint8_t getI2SVolume(void);
 void    loadI2SVolumeFromNVS(void);
 
+/* Live volume change WITHOUT touching NVS — for continuous UI drags (a volume
+ * slider sweep fires every frame; an NVS/flash write per frame stalls playback
+ * and wears the flash). Apply with setI2SVolumeLive() during the drag, then
+ * call commitI2SVolume() once on release to persist the final value. commit is
+ * a no-op if nothing changed since the last persisted value. */
+void    setI2SVolumeLive(uint8_t pct);
+void    commitI2SVolume(void);
+
 #endif

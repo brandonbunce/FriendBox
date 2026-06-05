@@ -534,6 +534,62 @@ void Panel_PCBA5981::blitFrames(uint32_t src_addr, uint16_t src_x, uint16_t src_
     if (!tr) end_transaction();
 }
 
+// BTE Memory Copy with Opacity (Picture Mode), datasheet §7.6.9 / Table 7-1
+// op code 1010b. Blends two SDRAM regions with a single whole-bitmap alpha:
+//     DT = (S0 * alpha) + (S1 * (1 - alpha))
+// where alpha32 is the REG[B5h] level (0..31 -> 0..31/32). For a UI fade-in,
+// pass S0 = overlay slot (e.g. SLOT_UI), S1 = dst = the background canvas, and
+// ramp alpha32 0 -> 31. All three regions share the panel width (8bpp).
+// NOTE: in 8bpp *index* mode the blend is over palette indices, not RGB, so the
+// visual result is only a true cross-fade if the palette is arranged for it;
+// the UI layer falls back to a dither reveal if this looks wrong on hardware.
+void Panel_PCBA5981::blitFramesAlpha(uint32_t s0_addr, uint16_t s0_x, uint16_t s0_y,
+                                     uint32_t s1_addr, uint16_t s1_x, uint16_t s1_y,
+                                     uint32_t dst_addr, uint16_t dst_x, uint16_t dst_y,
+                                     uint16_t w, uint16_t h, uint8_t alpha32)
+{
+    if (w == 0 || h == 0) return;
+    if (alpha32 > 31) alpha32 = 31;
+
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+
+    // op = Memory Copy with opacity (1010b); 8bpp start bit (high nibble 0).
+    _write_reg(0x91, 0x0A);
+    // S0 = 8bpp, S1 = 8bpp, dest = 8bpp.
+    _write_reg(0x92, 0x00);
+    // Picture-mode whole-bitmap alpha level.
+    _write_reg(0xB5, (uint8_t)(alpha32 & 0x3F));
+
+    // S0 (overlay).
+    _write_reg32(0x93, s0_addr);
+    _write_reg16(0x97, (uint16_t)timing.h_display);
+    _write_reg16(0x99, s0_x);
+    _write_reg16(0x9B, s0_y);
+
+    // S1 (background).
+    _write_reg32(0x9D, s1_addr);
+    _write_reg16(0xA1, (uint16_t)timing.h_display);
+    _write_reg16(0xA3, s1_x);
+    _write_reg16(0xA5, s1_y);
+
+    // Destination.
+    _write_reg32(0xA7, dst_addr);
+    _write_reg16(0xAB, (uint16_t)timing.h_display);
+    _write_reg16(0xAD, dst_x);
+    _write_reg16(0xAF, dst_y);
+
+    _write_reg16(0xB1, w);
+    _write_reg16(0xB3, h);
+
+    _write_reg(0x90, 0x10);   // BTE start
+    _wait_busy();
+
+    _flg_memorywrite = false;
+
+    if (!tr) end_transaction();
+}
+
 //============================================================================
 // ST7701S bit-bang init
 //============================================================================
@@ -1541,6 +1597,154 @@ void Panel_PCBA5981::dmaFlashBlock(uint32_t flash_addr,
         _write_reg16(0x54, (uint16_t)timing.h_display);
     }
     _canvas_addr = saved_canvas;
+    _flg_memorywrite = false;
+
+    if (!tr) end_transaction();
+}
+
+//============================================================================
+// User-defined character (UCG) glyph engine (§8.2)
+//============================================================================
+
+void Panel_PCBA5981::cgramSetStart(uint32_t cgram_addr)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+    _write_reg32(0xDB, cgram_addr);   // REG[DBh-DEh] CGRAM_STR
+    if (!tr) end_transaction();
+}
+
+// Write one ≤64-byte run into SDRAM as a single 64-wide × 1-tall block-mode
+// memory write (the same proven path as writeRawFrame8bpp). Caller frames the
+// transaction and restores the canvas. Multi-row block writes at a relocated
+// canvas were observed to corrupt the data; single rows round-trip cleanly.
+void Panel_PCBA5981::_cgram_write_row(uint32_t dst_addr, const uint8_t* data, uint16_t n)
+{
+    _flg_memorywrite = false;
+    _write_reg(0x03, 0x00);                         // graphic mode, image buffer
+    _write_reg(0x5E, 0x00);                         // block, 8bpp
+    _write_reg32(0x50, dst_addr);                   // CVSSA = row base
+    _write_reg16(0x54, 64);                         // CVS_IMWTH = 64 (matches window)
+
+    _win_xs = 0; _win_ys = 0; _win_xe = 63; _win_ye = 0;
+    _start_memorywrite();                           // active window (0,0,64,1) + select REG[04h]
+
+    static const uint8_t kPrefix = 0x80;
+    cs_control(false);
+    _bus->writeBytes(&kPrefix, 1, true, false);
+    _bus->wait();
+    _bus->writeBytes(data, n, true, true);
+    _bus->wait();
+    cs_control(true);
+
+    auto t0 = millis();
+    while ((_read_status() & 0x40) == 0) {          // wait Memory Write FIFO empty
+        if (millis() - t0 > 50) break;
+    }
+}
+
+// CGRAM glyph bytes live in SDRAM. Write them 64 bytes (one 16x32 glyph) at a
+// time — each a proven single-row block write — so the engine reads contiguous
+// stride-64 glyph data at cgram_addr + code*64.
+void Panel_PCBA5981::cgramWrite(uint32_t cgram_addr, const uint8_t* data, uint32_t len)
+{
+    if (!data || len == 0) return;
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+
+    uint32_t saved_canvas = _canvas_addr;
+
+    for (uint32_t off = 0; off < len; off += 64) {
+        uint16_t n = (uint16_t)((len - off) > 64 ? 64 : (len - off));
+        _cgram_write_row(cgram_addr + off, data + off, n);
+    }
+
+    // Restore the previous drawing canvas + full-width stride.
+    _write_reg32(0x50, saved_canvas);
+    _write_reg16(0x54, (uint16_t)timing.h_display);
+    _canvas_addr = saved_canvas;
+    _flg_memorywrite = false;
+
+    if (!tr) end_transaction();
+}
+
+// Read CGRAM bytes back (diagnostic) using the proven block-mode read path.
+void Panel_PCBA5981::cgramRead(uint32_t cgram_addr, uint8_t* buf, uint32_t len)
+{
+    if (!buf || len == 0) return;
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+
+    uint32_t saved_canvas = _canvas_addr;
+    const uint16_t W = 64;
+    uint16_t H = (uint16_t)((len + W - 1) / W);
+
+    _write_reg32(0x50, cgram_addr);
+    _write_reg16(0x54, W);
+    _write_reg(0x5E, 0x00);
+    _start_memoryread(0, 0, W, H);                  // selects REG[04h] read, discards dummy
+    for (uint32_t i = 0; i < len; i++) buf[i] = _read_byte();
+
+    _write_reg32(0x50, saved_canvas);
+    _write_reg16(0x54, (uint16_t)timing.h_display);
+    _canvas_addr = saved_canvas;
+    _flg_memorywrite = false;
+
+    if (!tr) end_transaction();
+}
+
+void Panel_PCBA5981::drawChar(uint16_t code, uint16_t x, uint16_t y,
+                              uint16_t fg565, uint16_t bg565,
+                              uint8_t heightCode, uint8_t enlarge, bool transparentBg,
+                              uint8_t charSource)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+
+    // Foreground (REG[D2h-D4h]) / Background (REG[D5h-D7h]) colors, RGB888.
+    auto wr888 = [&](uint8_t base, uint16_t c) {
+        _write_reg(base + 0, (uint8_t)((c >> 8) & 0xF8));  // R5 → R8
+        _write_reg(base + 1, (uint8_t)((c >> 3) & 0xFC));  // G6 → G8
+        _write_reg(base + 2, (uint8_t)((c << 3) & 0xF8));  // B5 → B8
+    };
+    wr888(0xD2, fg565);
+    wr888(0xD5, bg565);
+
+    // CCR1 (REG[CDh]): enlarge ×1..×4 on width+height, optional BG transparency.
+    uint8_t en = (uint8_t)((enlarge > 0 ? enlarge - 1 : 0) & 0x03);
+    uint8_t ccr1 = (uint8_t)((en << 2) | en);
+    if (transparentBg) ccr1 |= (1 << 6);
+    _write_reg(0xCD, ccr1);
+
+    // CCR0 (REG[CCh]): char source bits[7:6] (0=internal CGROM, 1=external
+    // CGROM, 2=user-defined CGRAM), height bits[5:4].
+    _write_reg(0xCC, (uint8_t)(((charSource & 0x03) << 6) | ((heightCode & 0x03) << 4)));
+
+    // Canvas in block (XY) 8bpp mode and a full-screen active window — the
+    // character engine renders into the active window and clips outside it.
+    _write_reg(0x5E, 0x00);
+    _set_active_window(0, 0, timing.h_display, timing.v_display);
+
+    // Text write position.
+    _write_reg16(0x63, x);   // F_CURX
+    _write_reg16(0x65, y);   // F_CURY
+
+    // Enter text mode (REG[03h] bit2=1), dest = image buffer.
+    _flg_memorywrite = false;
+    _write_reg(0x03, 0x04);
+
+    // Character code is written to MRWDP (REG[04h]) as two ordinary data writes,
+    // high byte first — NOT a [0x80] auto-increment stream (that path is for
+    // bulk image data and would scatter the two bytes as pixels).
+    _write_reg(0x04, (uint8_t)(code >> 8));
+    _write_reg(0x04, (uint8_t)(code & 0xFF));
+
+    auto t0 = millis();
+    while (_read_status() & 0x08) {       // wait core idle
+        if (millis() - t0 > 50) break;
+    }
+
+    _write_reg(0x03, 0x00);               // back to graphic mode
     _flg_memorywrite = false;
 
     if (!tr) end_transaction();
