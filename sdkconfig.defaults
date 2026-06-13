@@ -86,6 +86,10 @@ CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
 # lwIP — give us enough sockets for download + future API calls
 #
 CONFIG_LWIP_MAX_SOCKETS=10
+# WiFi + lwIP buffers already live in PSRAM (CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP
+# is enabled by default with SPIRAM_USE_MALLOC). The internal-RAM crunch during
+# playback is solved by reserving the decode buffer + producer task stack at boot
+# (see src/mem.cpp), not by further WiFi tuning.
 
 #
 # Compiler

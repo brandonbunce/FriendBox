@@ -89,6 +89,8 @@ void handleMenuButton(bool recheckInput);
 void saveImageToSD(int slot);
 void loadImageFromSD(int slot);
 std::vector<std::string> sdGetFboxFiles();
+/** List .fbox files received from friends (/sd/sketches/received). */
+std::vector<std::string> sdGetReceivedFboxFiles();
 
 /** Parse the 512-byte FBOX v4 header from a source positioned at byte 0.
  *  Returns false on bad magic, wrong version, or file-size mismatch.
@@ -207,8 +209,14 @@ void loadSketchFromSD(const char *path);
 
 /** Play all frames of an FBOX v4 animation from the given source.
  *  Stops when the screen is touched. Audio is interleaved per-frame and
- *  streamed to I2S in real time — no caller-side audio handling. */
-PlaybackResult playFboxAnimation(FboxSource &src);
+ *  streamed to I2S in real time — no caller-side audio handling.
+ *
+ *  source_self_loops: pass true when `src` delivers a seamless, repeating
+ *  [file][file]… byte stream (a FboxSourceRingBuffered with setLoop(true)). The
+ *  producer then loops with no teardown/rebuild — at EOF it re-reads the next
+ *  pass's header and keeps feeding frames, so the consumer sees no gap. When
+ *  false (or Loop is off), it signals EOF after one pass and returns. */
+PlaybackResult playFboxAnimation(FboxSource &src, bool source_self_loops = false);
 
 /** Convenience wrapper: open path on SD, wrap with the PSRAM ring buffer, and
  *  play. The ring loader pulls from SD into PSRAM while the producer/consumer

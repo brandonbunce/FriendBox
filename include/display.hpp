@@ -48,6 +48,20 @@ bool initDisplay();
 /** Read touch input as it becomes available and write to global variables.*/
 void handleTouch();
 
+/* Backlight brightness, 0..100 UI percent, driven by the LT7680's internal
+ * PWM (Panel_PCBA5981::setBrightness — no ESP32 pin). Same live/commit split
+ * as the I2S volume: a slider drag fires every frame, so the Live variant
+ * only touches the PWM registers, and commitDisplayBrightness() persists to
+ * NVS once on touch release (key "brt_pct", "Friendbox" namespace).
+ * The applied PWM duty is floored above zero so 0% stays faintly visible —
+ * a fully dark screen mid-drag would strand the user with no UI.
+ * Call loadDisplayBrightnessFromNVS() once at boot to restore. */
+void    setDisplayBrightnessLive(uint8_t pct);
+void    commitDisplayBrightness(void);
+void    setDisplayBrightness(uint8_t pct);   // one-shot: apply + persist
+uint8_t getDisplayBrightness(void);
+void    loadDisplayBrightnessFromNVS(void);
+
 /** Write one scanline of raw RGB565 pixels directly to the display,
  *  bypassing the LovyanGFX pixelcopy machinery. Safe to call without an
  *  active tft.startWrite() — manages its own SPI transaction. */

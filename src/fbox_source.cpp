@@ -1,4 +1,5 @@
 #include "fbox_source.hpp"
+#include "auth.hpp"
 #include "idf_compat.hpp"
 
 #include <cstring>
@@ -59,8 +60,8 @@ bool FboxSourceSD::reset()
 
 FboxSourceRingBuffered::FboxSourceRingBuffered(FboxSource *inner, uint32_t ring_bytes)
     : _inner(inner), _storage(nullptr), _stream(nullptr), _loader_task(nullptr),
-      _stop(false), _eof(false), _loader_done(false), _ring_bytes(ring_bytes),
-      _stall_count(0), _stall_time_us(0)
+      _stop(false), _eof(false), _loader_done(false), _loop(false),
+      _ring_bytes(ring_bytes), _stall_count(0), _stall_time_us(0)
 {
     _storage = (uint8_t *)heap_caps_malloc(ring_bytes + 1, MALLOC_CAP_SPIRAM);
     if (!_storage) {
@@ -117,7 +118,14 @@ void FboxSourceRingBuffered::loaderLoop()
 
     while (!_stop) {
         int r = _inner->read(chunk, kChunk);
-        if (r <= 0) break;
+        if (r <= 0) {
+            // Inner EOF. In loop mode, rewind and keep filling so the ring
+            // never drains at the file boundary — the reader sees one
+            // continuous [file][file]… stream. If the rewind fails, fall
+            // through to the normal EOF path.
+            if (_loop && !_stop && _inner->reset()) continue;
+            break;
+        }
         size_t sent = 0;
         while (sent < (size_t)r && !_stop) {
             size_t s = xStreamBufferSend(_stream, chunk + sent, (size_t)r - sent,
@@ -213,6 +221,7 @@ bool FboxSourceHTTP::_open()
     }
     _client = esp_http_client_init(&cfg);
     if (!_client) return false;
+    authApplyHeader(_client);
     esp_err_t err = esp_http_client_open(_client, 0);
     if (err != ESP_OK) {
         printf("[FBOX-HTTP] open failed: %s\n", esp_err_to_name(err));
@@ -223,6 +232,7 @@ bool FboxSourceHTTP::_open()
     int status = esp_http_client_get_status_code(_client);
     if (status / 100 != 2) {
         printf("[FBOX-HTTP] %s status=%d\n", _url.c_str(), status);
+        if (status == 401) authNotify401();
         _close();
         return false;
     }

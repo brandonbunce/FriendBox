@@ -1,6 +1,7 @@
 #include "display.hpp"
 #include "canvas.hpp"
 #include "idf_compat.hpp"
+#include "nvs_store.hpp"
 #include <Panel_PCBA5981.hpp>
 
 LGFX tft;
@@ -26,6 +27,79 @@ bool initDisplay()
     tft.setColorDepth(8);
     //tft.setFont(&DejaVu9);
     return true;
+}
+
+//============================================================================
+// Backlight brightness (LT7680 internal PWM) — live/commit pattern copied
+// from setI2SVolumeLive/commitI2SVolume in audio_i2s.cpp; see display.hpp.
+//============================================================================
+
+extern NvsStore nvs;   // defined in io.cpp
+static const char *BRT_NVS_NAMESPACE = "Friendbox";
+static const char *BRT_NVS_KEY       = "brt_pct";
+
+static uint8_t s_brightness_pct           = 100;
+static uint8_t s_brightness_pct_persisted = 100;
+
+static void apply_brightness_pct(uint8_t pct)
+{
+    if (pct > 100) pct = 100;
+    // Floor the duty at ~5% (13/255) so the slider's bottom end dims the
+    // screen without blacking it out — the menu must stay findable.
+    uint32_t level = (uint32_t)pct * 255u / 100u;
+    if (level < 13) level = 13;
+    tft.setBrightness((uint8_t)level);
+    s_brightness_pct = pct;
+}
+
+static void persist_brightness_pct(uint8_t pct)
+{
+    if (pct == s_brightness_pct_persisted) return;
+    if (nvs.begin(BRT_NVS_NAMESPACE, /*read_only=*/false)) {
+        nvs.putUInt(BRT_NVS_KEY, (uint32_t)pct);
+        nvs.end();
+        s_brightness_pct_persisted = pct;
+    }
+}
+
+void setDisplayBrightnessLive(uint8_t pct)
+{
+    if (pct > 100) pct = 100;
+    if (pct == s_brightness_pct) return;
+    apply_brightness_pct(pct);           // PWM registers only; no flash I/O
+}
+
+void commitDisplayBrightness(void)
+{
+    persist_brightness_pct(s_brightness_pct);
+}
+
+void setDisplayBrightness(uint8_t pct)
+{
+    if (pct > 100) pct = 100;
+    if (pct == s_brightness_pct) return;
+    apply_brightness_pct(pct);
+    persist_brightness_pct(pct);
+}
+
+uint8_t getDisplayBrightness(void)
+{
+    return s_brightness_pct;
+}
+
+/* Self-explanatory, retrieve brightness from NVS and then apply*/
+void loadDisplayBrightnessFromNVS(void)
+{
+    uint8_t pct = 100;   // default if no saved value or NVS unavailable
+    if (nvs.begin(BRT_NVS_NAMESPACE, /*read_only=*/true)) {
+        uint32_t stored = nvs.getUInt(BRT_NVS_KEY, 100);
+        if (stored > 100) stored = 100;
+        pct = (uint8_t)stored;
+        nvs.end();
+    }
+    apply_brightness_pct(pct);
+    s_brightness_pct_persisted = pct;
+    Serial.printf("[DISPLAY] brightness restored from NVS: %u%%\n", (unsigned)pct);
 }
 
 void displayWriteScanline(int x, int y, int w, const uint16_t* data)

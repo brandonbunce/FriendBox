@@ -44,6 +44,13 @@ static bool     g_overlay    = false;   // current screen draws to SLOT_UI
 static bool     g_fillBg     = false;   // compose paints a solid background
 static uint32_t g_shownSlot  = LT7680_SLOT_CANVAS;
 
+// After a screen change the new screen's widgets are all freshly built with
+// pressed=false. If the finger is still down from the press that triggered the
+// change, a button at the same spot would read a phantom "just pressed" and
+// fire instantly (e.g. System->Home landing on Home's System button). Swallow
+// all widget input until the touch is physically released at least once.
+static bool     g_touchGate  = false;
+
 } // namespace ui
 
 // Legacy-compatible globals.
@@ -373,6 +380,7 @@ void changeScreenContext(screen_id_t target)
     g_count = 0; g_opCount = 0; g_depth = 0;
     if (s.build) s.build();
 
+    g_touchGate = true;   // ignore the lingering press until the finger lifts
     animPlayEnter((AnimKind)s.enterAnim);
 }
 
@@ -456,6 +464,15 @@ void tick()
 {
     const Screen &s = g_screens[currentScreen];
     if (s.customTick) s.customTick();
+
+    // Touch gate: after a screen change, suppress all widget input until the
+    // finger lifts, so the press that caused the change can't fire on the new
+    // screen too. Clears the frame touchZ first goes to 0.
+    if (g_touchGate) {
+        if (!touchZ) g_touchGate = false;
+        if (animActive()) animTick();
+        return;
+    }
 
     screen_id_t before = currentScreen;
     for (int i = 0; i < g_count; i++) {

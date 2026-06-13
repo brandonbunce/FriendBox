@@ -33,6 +33,11 @@ static bool installChannel(uint32_t sample_rate)
     // scheduling jitter from competing core-1 work (SPI consumer, etc.).
     chan_cfg.dma_desc_num  = 6;
     chan_cfg.dma_frame_num = 240;
+    // Send zeros on underrun instead of replaying the last DMA buffer. Without
+    // this the UI SFX session loops a blip's tail into a buzz once its few
+    // frames drain (and playback would replay stale audio on a glitch). The
+    // driver clears each TX buffer after it's sent.
+    chan_cfg.auto_clear_after_cb = true;
 
     esp_err_t err = i2s_new_channel(&chan_cfg, &s_tx_chan, nullptr);
     if (err != ESP_OK) {
@@ -209,6 +214,15 @@ bool pushI2SSamples(const int16_t *pcm, uint32_t n_samples)
     return true;
 }
 
+bool flushI2SStreaming()
+{
+    if (!s_stream) return false;
+    // xStreamBufferReset returns pdFAIL if a task is currently blocked on the
+    // buffer. At pause the buffer is near-full and the writer is draining, not
+    // blocked, so this normally succeeds; surface failure rather than spin.
+    return xStreamBufferReset(s_stream) == pdPASS;
+}
+
 void stopI2SStreaming()
 {
     if (s_writer_done && !s_tx_chan) return;
@@ -290,6 +304,7 @@ uint8_t getI2SVolume(void)
     return s_volume_pct;
 }
 
+/* Restore persisted I2S volume from NVS; Default 100% if no saved value.*/
 void loadI2SVolumeFromNVS(void)
 {
     uint8_t pct = 100;   // default if no saved value or NVS unavailable

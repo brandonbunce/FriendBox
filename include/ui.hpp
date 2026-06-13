@@ -40,6 +40,13 @@ typedef enum
     SCREEN_SEND,           // address book
     SCREEN_FILE_BROWSER,   // SD .fbox browser
     SCREEN_SYSTEM_MESSAGE, // transient loading/error overlay
+    SCREEN_PAIRING,        // device login: shows the pairing code (auth.hpp)
+    SCREEN_HOME,           // default shell: Draw / Sketches / System over sketch bg
+    SCREEN_SYSTEM,         // settings: brightness, volume, wifi, sign-out, reboot
+    SCREEN_SKETCHES,       // browser for received sketches (/sketches/received)
+    SCREEN_OOBE_WELCOME,   // first-run welcome → wifi setup
+    SCREEN_WIFI_SCAN,      // SSID scan list (OOBE + System)
+    SCREEN_KEYBOARD,       // shared on-screen text-entry keyboard (ui::keyboardOpen)
     SCREEN_COUNT
 } screen_id_t;
 
@@ -222,8 +229,20 @@ uint16_t paletteTextColor(int idx);
 // ---------------------------------------------------------------------------
 void initSfx();             // synthesize clips (call once at boot)
 void playSfx(SfxId id);
+void sfxTick();             // call once per UI loop: closes the idle SFX session
 void suspendSfxSession();   // release I2S to fbox playback
 void resumeSfxSession();    // reclaim I2S (lazy: next playSfx restarts)
+
+// ---------------------------------------------------------------------------
+// Shared on-screen keyboard (SCREEN_KEYBOARD). A reusable text-entry screen:
+// open it with a title + initial text + a result callback. onDone fires on Go
+// (accepted=true) or Cancel (accepted=false) with the current text; the callback
+// owns the next changeScreenContext(). `mask` renders the entry as dots; `maxLen`
+// clamps input (<= 128).
+// ---------------------------------------------------------------------------
+typedef void (*KeyboardDoneFn)(const char *text, bool accepted);
+void keyboardOpen(const char *title, const char *initial, KeyboardDoneFn onDone,
+                  bool mask = false, int maxLen = 64);
 
 // ---------------------------------------------------------------------------
 // Salvaged helpers.

@@ -51,8 +51,10 @@ static void drawLabel(const Widget &w)
 static void drawSlider(const Widget &w)
 {
     uint16_t accent = fillColorOf(w);
-    if (!screenIsOverlay())
-        tft.fillRectGPU(w.x, w.y, w.x + w.w - 1, w.y + w.h - 1, bgColor());
+    // Clear the whole slider rect first: a drag redraws every frame, so the
+    // previous knob/fill must be erased or it smears across the track. Sliders
+    // only appear on overlay screens, whose background is bgColor().
+    tft.fillRectGPU(w.x, w.y, w.x + w.w - 1, w.y + w.h - 1, bgColor());
 
     int margin = w.h / 2;
     int lo = w.x + margin, hi = w.x + w.w - margin;

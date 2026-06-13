@@ -105,6 +105,14 @@ public:
     uint32_t stallCount() const { return _stall_count; }
     uint64_t stallTimeUs() const { return _stall_time_us; }
 
+    /* Seamless looping: when enabled, the loader rewinds the inner source on
+     * EOF and keeps filling the ring instead of stopping. The byte stream
+     * becomes effectively infinite ([file][file][file]…) so a reader can play
+     * the file back-to-back with no refill stall at the loop boundary. The
+     * reader is responsible for re-parsing each repeated header. Safe to set
+     * before the first read; the loader picks it up at the next inner EOF. */
+    void     setLoop(bool on) { _loop = on; }
+
 private:
     static void  loaderTrampoline(void *arg);
     void         loaderLoop();
@@ -117,6 +125,7 @@ private:
     volatile bool        _stop;
     volatile bool        _eof;
     volatile bool        _loader_done;   // set by loader just before vTaskDelete
+    volatile bool        _loop;          // rewind inner on EOF instead of stopping
     uint32_t             _ring_bytes;
     uint32_t             _stall_count;
     uint64_t             _stall_time_us;

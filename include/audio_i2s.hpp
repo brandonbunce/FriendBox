@@ -27,6 +27,14 @@ bool pushI2SSamples(const int16_t *pcm, uint32_t n_samples);
  * I2S channel. No-op if not running. */
 void stopI2SStreaming();
 
+/* Discard all PCM queued in the PSRAM stream buffer without tearing down the
+ * channel. Used on playback pause so buffered audio (~660 ms of cushion) stops
+ * promptly instead of playing on, and so resume re-syncs to live frames rather
+ * than draining a stale backlog. The ~65 ms already in the I2S DMA descriptors
+ * still plays out. No-op if not running. Returns false if the reset could not
+ * be performed (e.g. the writer task was blocked on the buffer at that instant). */
+bool flushI2SStreaming();
+
 /* Software volume control. NS4168 is a fixed-gain Class-D amp (no digital
  * volume input), so attenuation must happen in PCM before I2S. Scaling lives
  * in the writer task's mono→stereo expansion — single chokepoint, takes

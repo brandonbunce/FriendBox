@@ -365,6 +365,52 @@ void Panel_PCBA5981::setCanvasAddress(uint32_t addr)
     if (!tr) end_transaction();
 }
 
+//============================================================================
+// Backlight PWM (datasheet §9 Pulse Width Modulation, registers §13.7)
+//============================================================================
+// PWM timer clock = CCLK / (PSCLR+1). CCLK = 100 MHz (pll_core N=100, R=5,
+// OD=1), so PSCLR=4 → 20 MHz timer clock. With a 10-bit period (TCNTB=1023)
+// the PWM output runs at ~19.5 kHz — above the audible range so the backlight
+// boost inductor can't whine, and far above flicker perception.
+static constexpr uint8_t  PWM_PRESCALE = 4;
+static constexpr uint16_t PWM_PERIOD   = 1023;   // TCNTB; duty resolution 1/1024
+
+// One-time PWM setup, called at the end of init(). The ER-PCBA5981 board
+// datasheet doesn't document whether the J2 "internal PWM" jump point routes
+// PWM[0] or PWM[1] to the backlight circuit, so both timers are programmed
+// identically and both pins output their timer — whichever one the board
+// uses, it gets the right waveform. The other pin is unconnected on CON1.
+void Panel_PCBA5981::_init_backlight_pwm(void)
+{
+    _write_reg(0x84, PWM_PRESCALE);    // PSCLR: prescaler
+    // PMUXR: Timer-0/1 divisors = /1 (bits[7:4]=0000b),
+    //        PWM[1] = Timer-1 output (bits[3:2]=10b),
+    //        PWM[0] = Timer-0 output (bits[1:0]=10b).
+    _write_reg(0x85, 0x0A);
+    _write_reg16(0x8A, PWM_PERIOD);    // TCNTB0: Timer-0 period
+    _write_reg16(0x8E, PWM_PERIOD);    // TCNTB1: Timer-1 period
+    _write_reg16(0x88, PWM_PERIOD);    // TCMPB0: full duty (backlight on)
+    _write_reg16(0x8C, PWM_PERIOD);    // TCMPB1: full duty
+    // PCFGR: Timer-1 auto-reload + start (bits 5,4), Timer-0 auto-reload +
+    // start (bits 1,0). Inverters off, dead zone off.
+    _write_reg(0x86, 0x33);
+}
+
+// Output is high while the down-counter is <= TCMPB (inverter off), so
+// duty_high = (TCMPB+1)/(TCNTB+1). brightness 255 maps to TCMPB=TCNTB =
+// always-high; brightness 0 maps to TCMPB=0 which still spends one timer
+// tick high per cycle (1/1024 duty) — visually off. Auto-reload latches the
+// new compare value at the next cycle boundary, so updates are glitch-free.
+void Panel_PCBA5981::setBrightness(uint8_t brightness)
+{
+    bool tr = _in_transaction;
+    if (!tr) begin_transaction();
+    uint16_t duty = (uint16_t)(((uint32_t)brightness * PWM_PERIOD + 127) / 255);
+    _write_reg16(0x88, duty);   // TCMPB0
+    _write_reg16(0x8C, duty);   // TCMPB1
+    if (!tr) end_transaction();
+}
+
 // Filled rectangle via the Geometric Drawing Engine (datasheet pg. 145).
 // Programs the rectangle endpoints into REG[68h-6Fh], the foreground colour
 // into REG[D2h-D4h], then sets REG[76h] = bit7|bit6|bits[5:4]=10b which is
@@ -947,6 +993,13 @@ bool Panel_PCBA5981::init(bool use_reset)
         if (timing.pclk_rising) dpcr |= 0x80;
         _write_reg(0x12, dpcr);
     }
+
+    // ---- Backlight PWM ----
+    // With the board strapped for internal PWM (J1 open / J2 short) the
+    // backlight stays dark until these timers run, so start them at full
+    // duty here. Harmless when strapped for external control.
+    _init_backlight_pwm();
+
     endWrite();
 
     _latestcolor = ~0u;

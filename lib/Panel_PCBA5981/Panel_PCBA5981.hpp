@@ -89,6 +89,14 @@ namespace lgfx
     void beginTransaction(void) override;
     void endTransaction(void) override;
 
+    // Backlight brightness via the LT7680's internal PWM (datasheet §9,
+    // registers §13.7). Requires the board's backlight jump points set to
+    // "internal PWM" (ER-PCBA5981: J1 open, J2 short — external is the
+    // factory default). No ESP32 GPIO involved; tft.setBrightness() lands
+    // here through the normal LovyanGFX path. 255 = full on; 0 = off
+    // (residual 1/1024 duty — see _init_backlight_pwm).
+    void setBrightness(uint8_t brightness) override;
+
     // -- Multi-frame SDRAM addressing -------------------------------------
     // Bytes per frame at the chip's native 16bpp RGB565 depth.
     static constexpr uint32_t framebufferBytes16bpp(uint16_t w, uint16_t h)
@@ -325,6 +333,7 @@ namespace lgfx
     void _set_forecolor(uint32_t rawcolor);
     void _write_pixel16(uint16_t color);  // converts RGB565→RGB332 index, writes 1 byte (8bpp)
     void _init_clut_rgb332(void);         // programs the 256-entry RGB332 CLUT at startup
+    void _init_backlight_pwm(void);       // starts PWM timers 0+1 at full duty (backlight)
 
     // Read one byte from the LT7680 memory port via the [0xC0] prefix
     // CS-toggled 16-bit transaction.

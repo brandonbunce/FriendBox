@@ -57,12 +57,14 @@ static void loadGlyphsToCgram()
            (unsigned)LT_GLYPH_COUNT, (unsigned)LT7680_CGRAM_ADDR);
 }
 
-void ltAssetsInit()
+/* Program LT7680 flash assets (one-time) + load glyphs into CGRAM. */
+void initLTAssets()
 {
     if (!markerValid()) programAssets();
     loadGlyphsToCgram();
 }
 
+/* DMA splash screen to LT7680.*/
 void ltShowSplash()
 {
     if (lt_splash_w && lt_splash_h && markerValid()) {

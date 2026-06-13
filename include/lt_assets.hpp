@@ -50,7 +50,7 @@ extern const uint8_t  lt_splash_data[];
 
 // Program embedded assets into LT7680 flash if the marker is missing/stale, then
 // load glyphs into CGRAM. Call once at boot after the panel is initialized.
-void ltAssetsInit();
+void initLTAssets();
 
 // Paint the boot splash into SLOT_CANVAS (flash DMA if present, else GPU wordmark).
 void ltShowSplash();

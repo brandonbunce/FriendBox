@@ -16,9 +16,11 @@
 #include "idf_compat.hpp"
 
 #include "secrets.hpp"
+#include "auth.hpp"
 #include "canvas.hpp"
 #include "display.hpp"
 #include "io.hpp"
+#include "mem.hpp"
 #include "network.hpp"
 #include "ui.hpp"
 #include "lt_assets.hpp"
@@ -31,14 +33,12 @@ static const char *TAG = "friendbox";
 
 static void initFriendbox()
 {
-    
+    // Select random pallette color on startup.
     currentDrawColorIndex = 0 + (esp_random() % (15 - 0 + 1));
     initDisplay();
-    // Program LT7680 flash assets (one-time) + load glyphs into CGRAM, then show
-    // the boot splash as the first visible frame instead of SDRAM garbage.
-    ltAssetsInit();
+    initLTAssets();
+    loadDisplayBrightnessFromNVS();
     ltShowSplash();
-    delay(900);
     registerFriendboxScreens();   // must precede any changeScreenContext()
     drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 0, "Initializing SD");
     if (initSD(false))
@@ -68,24 +68,15 @@ static void initFriendbox()
         puts("Inited Touch!");
         drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 250, "Initializing Touch", "Done!");
     }
-    drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 0, "Initializing Wi-Fi", NETWORK_SSID);
-    if (initNetwork(NETWORK_SSID, NETWORK_PASS, LOCAL_HOSTNAME))
-    {
-        drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 250, "Initializing Wi-Fi", "Done!");
-    }
-    else
-    {
-        drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 1000, "Initializing Wi-Fi", "Failed!  Networked functions will not work.");
-    }
     drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 0, "Initializing NVS");
     if (initNVS())
     {
         drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 500, "Initializing NVS", "Done!");
     }
-    // Restore persisted I2S volume so startI2SStreaming picks up the user's
-    // last setting on first playback. Default 100% if no saved value.
+    authInit();
     loadI2SVolumeFromNVS();
-    ui::initSfx();   // synthesize UI blips (lazy I2S session opens on first playSfx)
+    setI2SVolume(10);
+    ui::initSfx();
     tft.fillScreen(draw_color_palette_text_color[currentDrawColorIndex]);
     if (couldInitCanvasFrameBuffer)
     {
@@ -93,7 +84,59 @@ static void initFriendbox()
         //loadImageFromSD(nvs.getUInt("lastActiveSlot", 8));
         nvs.end();
     }
-    changeScreenContext(SCREEN_CANVAS);
+
+    // ── First-run gate ──
+    // No Wi-Fi credentials stored → onboarding (OOBE) walks the user through
+    // Wi-Fi setup, then sign-in, before reaching the home shell.
+    if (!wifiIsConfigured())
+    {
+        changeScreenContext(SCREEN_OOBE_WELCOME);
+        return;
+    }
+
+    drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 0, "Initializing Wi-Fi");
+    bool wifiOk = networkConnectSaved();
+    memReport("post-wifi");
+    if (wifiOk)
+    {
+        drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 250, "Initializing Wi-Fi", "Done!");
+    }
+    else
+    {
+        drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 1000, "Initializing Wi-Fi", "Failed!  Networked functions will not work.");
+    }
+
+    // ── Sign-in gate ──
+    // No token → pairing screen. Token → validate against the server; only an
+    // explicit rejection unpairs (a transport failure keeps the appliance
+    // usable offline with the stored token intact).
+    if (wifiOk && !authHasToken())
+    {
+        changeScreenContext(SCREEN_PAIRING);   // build() starts the pairing task
+        return;
+    }
+    if (wifiOk)
+    {
+        drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 0, "Signing in");
+        switch (authValidateToken())
+        {
+            case AuthCheck::VALID:
+                drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 500, "Signing in",
+                                           authUsername());
+                break;
+            case AuthCheck::INVALID:
+                authForgetToken();
+                drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 800, "Signing in",
+                                           "Signed out by server.");
+                changeScreenContext(SCREEN_PAIRING);
+                return;
+            case AuthCheck::NET_ERROR:
+                drawFriendboxLoadingScreen(FRIENDBOX_SOFTWARE_VERSION, 800, "Signing in",
+                                           "Server unreachable - staying signed in.");
+                break;
+        }
+    }
+    changeScreenContext(SCREEN_HOME);
 }
 
 /* Download by sketch ID and then play from SD. */
@@ -118,8 +161,17 @@ static void playSketchFromServer(const char *sketch_id)
 static void uiLoopTask(void *)
 {
     while (true) {
+        // A 401 from any API call signs the device out and re-enters pairing.
+        // Playback blocks this task, so the transition can never tear down an
+        // active playback pipeline.
+        if (authConsume401() && currentScreen != SCREEN_PAIRING) {
+            puts("[auth] server rejected token — returning to pairing");
+            authForgetToken();
+            changeScreenContext(SCREEN_PAIRING);
+        }
         handleTouch();          // GT911 -> touchX/Y/Z globals
         ui::tick();             // custom tick (canvas paint) + widget dispatch + anim
+        ui::sfxTick();          // close the idle SFX session (kills I2S underrun buzz)
         handleMenuButton(false);
         vTaskDelay(1);  // yield: 1 tick keeps the IDLE/WDT happy
     }
@@ -142,18 +194,29 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "FriendBox %s - DEBUG", FRIENDBOX_SOFTWARE_VERSION);
 #endif
 
+    // Reserve the 115 KB internal playback decode buffer NOW, while internal RAM
+    // is still pristine and contiguous (before display/SD/WiFi fragment it). This
+    // guarantees .fbox playback always gets the fast internal decode path.
+    memInit();
+    memReservePlaybackScratch();
+    memReport("boot");
+
     initMenuButton();
     initFriendbox();
-
-    setI2SVolume(25);
-    playSketchFromServer("1780336773819"); // F12 v2
-    playSketchFromServer("1779592535336"); // OW Gameplay
+    //playSketchFromServer("1780336773819"); // F12 v2
+    //playSketchFromServer("1779592535336"); // OW Gameplay
     //playSketchFromServer("1776797823148"); // Troll Physics 2
-    playSketchFromServer("1778969174678"); // Kitty Dithered 24fps
+    //playSketchFromServer("1778969174678"); // Kitty Dithered 24fps
     //playSketchFromServer("1776836243916"); // Dithering Glitch Test
-    playSketchFromServer("1776835153465"); // Ben Troll Physics 24fps
+    //playSketchFromServer("1776835153465"); // Ben Troll Physics 24fps
 
     // Core 0 runs the producer/decoder for animations; pin
     // the UI loop to core 1 so it shares the main-task core.
-    xTaskCreatePinnedToCore(uiLoopTask, "ui_loop", 8192, nullptr, 1, nullptr, 1);
+    //
+    // Stack: loadSketchFromSD() (home background + file browser) puts a
+    // FboxRleReader — which holds a 4 KB buf[] — plus a 960 B scanline buffer on
+    // the stack, then descends the f_open → FATFS → sdmmc → heap chain on top.
+    // 8 KB overflowed into the heap (StoreProhibited in the allocator); 16 KB
+    // leaves comfortable headroom.
+    xTaskCreatePinnedToCore(uiLoopTask, "ui_loop", 16384, nullptr, 1, nullptr, 1);
 }

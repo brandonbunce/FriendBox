@@ -18,7 +18,6 @@ class LGFX : public lgfx::LGFX_Device
 {
   lgfx::Panel_PCBA5981 _panel_instance;
   lgfx::Bus_SPI        _bus_instance;
-  lgfx::Light_PWM      _light_instance;
   lgfx::Touch_GT911    _touch_instance;
 
 public:
@@ -80,15 +79,10 @@ public:
       _panel_instance.st7701s_pins.pin_din = 10;
     }
 
-    {
-      //auto cfg = _light_instance.config();
-      //cfg.pin_bl      = -1;
-      //cfg.invert      = false;
-      //cfg.freq        = 44100;
-      //cfg.pwm_channel = 7;
-      //_light_instance.config(cfg);
-      //_panel_instance.setLight(&_light_instance);
-    }
+    // Backlight: no lgfx::Light_PWM / ESP32 GPIO. The LT7680's internal PWM
+    // drives the backlight (board strapped J1 open / J2 short) and
+    // Panel_PCBA5981 overrides setBrightness() to program it, so
+    // tft.setBrightness() works with no extra wiring here.
 
     {
       auto cfg = _touch_instance.config();

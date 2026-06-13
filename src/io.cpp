@@ -2,6 +2,7 @@
 #include "display.hpp"
 #include "canvas.hpp"
 #include "ui.hpp"
+#include "mem.hpp"
 #include "lt_assets.hpp"
 #include "audio.hpp"
 #include "audio_i2s.hpp"
@@ -602,7 +603,12 @@ struct KeyframeEntry {
 
 struct ProducerCtx {
     FboxSource         *src;            // CRC-wrapped source
+    FboxSourceCrc      *crc;            // same object, typed for crc() readout
     const FboxHeader   *hdr;
+    // True when `src` delivers a seamless [file][file]… stream on its own (the
+    // PSRAM ring with looping enabled). Lets the producer loop with no rebuild:
+    // at EOF it re-reads the next pass's header and keeps feeding slots.
+    bool                src_self_loops;
     const uint8_t      *clut_lut;
     const uint16_t     *clut_pair;      // 256-entry pair lookup, hot in decode
     uint8_t            *frame_4bpp;     // INTERNAL SRAM, PIXEL_COUNT/2 bytes — XOR baseline
@@ -611,6 +617,8 @@ struct ProducerCtx {
     SemaphoreHandle_t   sem_ready;
     volatile bool      *cancel;
     bool                ran_to_eof;
+    bool                crc_checked;    // producer ran the first-pass CRC compare
+    bool                crc_ok;         // result of that compare (valid iff crc_checked)
     TaskHandle_t        task;
     // v4: per-frame chunk sizes (from frame_size_table). Read once before producer
     // task starts. Owned by playFboxAnimation; producer reads only.
@@ -677,14 +685,14 @@ static PlaybackController g_pbc = {
 };
 
 constexpr int PB_MENU_X  = 100;
-constexpr int PB_MENU_Y  = 60;
+constexpr int PB_MENU_Y  = 46;
 constexpr int PB_MENU_W  = 280;
-constexpr int PB_MENU_H  = 360;
+constexpr int PB_MENU_H  = 388;
 constexpr int PB_BTN_X   = 120;
 constexpr int PB_BTN_W   = 240;
 constexpr int PB_BTN_H   = 50;
 constexpr int PB_BTN_GAP = 8;
-constexpr int PB_BTN_Y0  = 70;
+constexpr int PB_BTN_Y0  = PB_MENU_Y + 10;
 
 // Continuous volume slider (replaces the old 5 discrete presets). Tap anywhere
 // on the track to jump, or hold and drag to sweep 0..100%. Spans PB_BTN_W and
@@ -694,16 +702,21 @@ constexpr int PB_VOL_W      = PB_BTN_W;
 constexpr int PB_VOL_H      = 60;
 constexpr int PB_VOL_Y      = PB_BTN_Y0 + PB_BTN_COUNT * (PB_BTN_H + PB_BTN_GAP) + PB_BTN_GAP;
 constexpr int PB_VOL_KNOB_R = 18;            // knob radius
-constexpr int PB_VOL_TRACK_Y= PB_VOL_Y + 40; // track centerline (label sits above)
+
+// Backlight brightness slider, same geometry, directly below the volume
+// slider. Drives the LT7680's internal PWM via setDisplayBrightnessLive().
+constexpr int PB_BRT_Y      = PB_VOL_Y + PB_VOL_H + PB_BTN_GAP;
 
 // Hit-test result encoding:
 //   PB_HIT_OUTSIDE → tap was outside the menu rect (caller dismisses)
 //   PB_HIT_NONE    → tap inside the menu but not on any button (no-op)
 //   0..3           → main button index (PB_BTN_*)
 //   PB_HIT_VOL     → tap landed on the volume slider
+//   PB_HIT_BRT     → tap landed on the brightness slider
 constexpr int PB_HIT_OUTSIDE = -2;
 constexpr int PB_HIT_NONE    = -1;
 constexpr int PB_HIT_VOL     = 10;
+constexpr int PB_HIT_BRT     = 11;
 
 static inline int pb_btn_y(int idx) { return PB_BTN_Y0 + idx * (PB_BTN_H + PB_BTN_GAP); }
 
@@ -730,6 +743,7 @@ static int pb_hit_test(int x, int y)
         if (pb_rect_contains(PB_BTN_X, pb_btn_y(i), PB_BTN_W, PB_BTN_H, x, y)) return i;
     }
     if (pb_rect_contains(PB_VOL_X, PB_VOL_Y, PB_VOL_W, PB_VOL_H, x, y)) return PB_HIT_VOL;
+    if (pb_rect_contains(PB_VOL_X, PB_BRT_Y, PB_VOL_W, PB_VOL_H, x, y)) return PB_HIT_BRT;
     return PB_HIT_NONE;
 }
 
@@ -739,6 +753,10 @@ static void pb_handle_tap(PlaybackController &c, int x, int y)
     if (hit == PB_HIT_OUTSIDE) { c.menu_open = false; return; }
     if (hit == PB_HIT_VOL) {
         setI2SVolumeLive(pb_vol_pct_from_x(x));   // persisted on touch release
+        return;
+    }
+    if (hit == PB_HIT_BRT) {
+        setDisplayBrightnessLive(pb_vol_pct_from_x(x));   // persisted on release
         return;
     }
     switch (hit) {
@@ -760,13 +778,14 @@ struct PlaybackMenuCache {
     bool    paused;
     bool    loop_enabled;
     uint8_t volume_pct;
+    uint8_t brightness_pct;
 };
-static PlaybackMenuCache g_pbc_cache = { /*valid=*/false, false, false, 0 };
+static PlaybackMenuCache g_pbc_cache = { /*valid=*/false, false, false, 0, 0 };
 
-// Volume is intentionally NOT in the signature: dragging the slider changes it
-// nearly every frame, and a full re-render (4 buttons + software text labels)
-// per frame would stall the SPI burst. Volume changes take the cheap
-// slider-only repaint path in pb_draw_menu() instead.
+// Volume/brightness are intentionally NOT in the signature: dragging a slider
+// changes them nearly every frame, and a full re-render (4 buttons + software
+// text labels) per frame would stall the SPI burst. Slider changes take the
+// cheap slider-only repaint path in pb_draw_menu() instead.
 static bool pb_cache_matches(const PlaybackController &c)
 {
     return g_pbc_cache.valid
@@ -774,42 +793,52 @@ static bool pb_cache_matches(const PlaybackController &c)
         && g_pbc_cache.loop_enabled == c.loop_enabled;
 }
 
-// Draw just the volume slider into the current canvas (assumed pointed at
-// SLOT_MENU, inside an active startWrite). Self-contained: fills its own dark
-// panel first so it can be re-run in isolation to repaint on a volume change
-// without touching the (expensive) button labels. Records the rendered pct.
-static void pb_draw_slider()
+// Draw one slider into the current canvas (assumed pointed at SLOT_MENU,
+// inside an active startWrite). Self-contained: fills its own dark panel
+// first so it can be re-run in isolation to repaint on a value change
+// without touching the (expensive) button labels.
+static void pb_draw_slider_at(int y, const char *name, uint8_t pct, uint16_t accent)
 {
-    const uint8_t cur_pct = getI2SVolume();
     int lo  = PB_VOL_X + PB_VOL_KNOB_R;
     int hi  = PB_VOL_X + PB_VOL_W - PB_VOL_KNOB_R;
     int span = hi - lo; if (span < 1) span = 1;
-    int knobX  = lo + cur_pct * span / 100;
-    int trackH = 10;
+    int knobX   = lo + pct * span / 100;
+    int trackH  = 10;
+    int track_y = y + 40;   // track centerline (label sits above)
 
-    tft.fillRoundRectGPU(PB_VOL_X-1, PB_VOL_Y-1, PB_VOL_W+2, PB_VOL_H+2, 10, 0xFFFF); // white border
-    tft.fillRoundRectGPU(PB_VOL_X,   PB_VOL_Y,   PB_VOL_W,   PB_VOL_H,   10, 0x0000); // black fill
+    tft.fillRoundRectGPU(PB_VOL_X-1, y-1, PB_VOL_W+2, PB_VOL_H+2, 10, 0xFFFF); // white border
+    tft.fillRoundRectGPU(PB_VOL_X,   y,   PB_VOL_W,   PB_VOL_H,   10, 0x0000); // black fill
 
     tft.setTextSize(2);
     tft.setTextColor(0xFFFF, 0x0000);
     char vlabel[12];
-    snprintf(vlabel, sizeof(vlabel), "Vol %u%%", (unsigned)cur_pct);
-    tft.drawCenterString(vlabel, PB_VOL_X + PB_VOL_W / 2, PB_VOL_Y + 6);
+    snprintf(vlabel, sizeof(vlabel), "%s %u%%", name, (unsigned)pct);
+    tft.drawCenterString(vlabel, PB_VOL_X + PB_VOL_W / 2, y + 6);
 
-    tft.fillRoundRectGPU(lo, PB_VOL_TRACK_Y - trackH/2, span, trackH, trackH/2, 0x4208); // gray track
+    tft.fillRoundRectGPU(lo, track_y - trackH/2, span, trackH, trackH/2, 0x4208); // gray track
     if (knobX - lo > 0)
-        tft.fillRoundRectGPU(lo, PB_VOL_TRACK_Y - trackH/2, knobX - lo, trackH, trackH/2, 0x07E0); // green fill
-    tft.fillCircleGPU(knobX, PB_VOL_TRACK_Y, PB_VOL_KNOB_R, 0x07E0); // green knob
-
-    g_pbc_cache.volume_pct = cur_pct;
+        tft.fillRoundRectGPU(lo, track_y - trackH/2, knobX - lo, trackH, trackH/2, accent);
+    tft.fillCircleGPU(knobX, track_y, PB_VOL_KNOB_R, accent); // knob
 }
 
-// Repaint ONLY the slider region of the cache. Used on the volume-drag fast
-// path so a slider sweep never re-renders the 4 button labels.
-static void pb_render_slider_to_cache()
+// Both sliders (volume green, brightness amber). Records the rendered values
+// so pb_draw_menu can detect staleness.
+static void pb_draw_sliders()
+{
+    const uint8_t vol = getI2SVolume();
+    const uint8_t brt = getDisplayBrightness();
+    pb_draw_slider_at(PB_VOL_Y, "Vol", vol, 0x07E0);
+    pb_draw_slider_at(PB_BRT_Y, "Brt", brt, 0xFD20);
+    g_pbc_cache.volume_pct     = vol;
+    g_pbc_cache.brightness_pct = brt;
+}
+
+// Repaint ONLY the slider region of the cache. Used on the slider-drag fast
+// path so a sweep never re-renders the 4 button labels.
+static void pb_render_sliders_to_cache()
 {
     displayAnimCanvasToMenuCache();
-    pb_draw_slider();
+    pb_draw_sliders();
 }
 
 // Render the menu chrome + all buttons into LT7680_SLOT_MENU. The 20+
@@ -844,7 +873,7 @@ static void pb_render_menu_to_cache(const PlaybackController &c)
         ui::glyphCentered(glyphs[i], PB_BTN_X, by, PB_BTN_W, PB_BTN_H, 0xFFFF, 1);
     }
 
-    pb_draw_slider();
+    pb_draw_sliders();
 
     g_pbc_cache.valid        = true;
     g_pbc_cache.paused       = c.paused;
@@ -856,9 +885,10 @@ static void pb_render_menu_to_cache(const PlaybackController &c)
 static void pb_draw_menu(const PlaybackController &c)
 {
     if (!pb_cache_matches(c)) {
-        pb_render_menu_to_cache(c);                 // full: buttons + slider
-    } else if (g_pbc_cache.volume_pct != getI2SVolume()) {
-        pb_render_slider_to_cache();                // cheap: slider region only
+        pb_render_menu_to_cache(c);                 // full: buttons + sliders
+    } else if (g_pbc_cache.volume_pct     != getI2SVolume() ||
+               g_pbc_cache.brightness_pct != getDisplayBrightness()) {
+        pb_render_sliders_to_cache();               // cheap: slider region only
     }
     displayAnimBlitMenuToBack(PB_MENU_X - 2, PB_MENU_Y - 2,
                               PB_MENU_W + 4, PB_MENU_H + 4);
@@ -896,6 +926,14 @@ void producerTask(void *param)
     const uint16_t samples_per_frame = ctx->hdr->audio_samples_per_frame;
 
     ImaAdpcmDecoder dec;
+
+    // Outer loop = one pass over the file per playback iteration. For seamless
+    // looping (self-looping source + Loop enabled) we re-read the next pass's
+    // header + frame table at the boundary and keep feeding slots, so the
+    // consumer never sees a gap. slot_idx rotates continuously across passes;
+    // loop_iter==0 is the first pass.
+    uint32_t loop_iter = 0;
+    for (;;) {
 
     for (uint16_t fi = 0; fi < ctx->hdr->frame_count && !error; fi++) {
         if (*ctx->cancel) break;
@@ -1016,6 +1054,26 @@ void producerTask(void *param)
                 // to help if the bug is in the external PSRAM controller's
                 // write queue (memw doesn't drain that), but cheap to verify.
                 __asm__ __volatile__ ("memw" ::: "memory");
+
+                // Trailing solid-color frame guard. The encoder emits a final
+                // fully-white padding frame on many sketches; shown for one beat
+                // at every loop boundary it reads as a white flash. If the LAST
+                // frame decoded to a single uniform color, downgrade it to SKIP
+                // so the consumer holds the previous frame instead of blitting
+                // the flash. Timing is unchanged (the slot still occupies its
+                // beat); audio for this frame was already pushed above. The scan
+                // early-exits on the first differing pixel, so non-uniform frames
+                // (the common case) cost ~one comparison.
+                if (fi == ctx->hdr->frame_count - 1) {
+                    uint8_t first = fb[0];
+                    bool uniform = true;
+                    for (uint32_t p = 1; p < PIXEL_COUNT; p++)
+                        if (fb[p] != first) { uniform = false; break; }
+                    if (uniform) {
+                        s.state = SLOT_SKIP;
+                        ctx->n_skip_frames++;
+                    }
+                }
             }
         }
         else if (!error) {
@@ -1038,12 +1096,21 @@ void producerTask(void *param)
         vTaskDelay(1);
     }
 
-    if (!error && !*ctx->cancel) {
+    // Frame loop ended early on error or cancel → leave the outer loop and
+    // tear down. (Decode errors emit their own error slot and goto producer_exit
+    // directly, so reaching here with error set means a cancel mid-frame.)
+    if (error || *ctx->cancel) break;
+
+    {
         // Drain the trailing keyframe table through the source so its bytes
         // flow through FboxSourceCrc and contribute to the file CRC32. Parse
         // entries into ctx->keyframes — playback ignores the table for now,
         // but future seek/scrub will use it.
         if (ctx->hdr->keyframe_count > 0 && ctx->keyframes) {
+            // Clear so each pass re-parses (and re-consumes) the table — the
+            // size-based loop guards below would otherwise skip the bytes on
+            // pass 2+ and desync the stream.
+            ctx->keyframes->clear();
             ctx->keyframes->reserve(ctx->hdr->keyframe_count);
             uint8_t entry[8];
             uint8_t pending_n = 0;
@@ -1082,13 +1149,59 @@ void producerTask(void *param)
                           (unsigned)ctx->keyframes->size());
         }
 
-        // Signal clean EOF
+    }
+
+    // CRC32 verification — first pass only. By the end of the keyframe table,
+    // crc folded in every byte [64..EOF]. Later passes re-read the header
+    // through crc and desync the accumulator, so only pass 0 is meaningful.
+    if (loop_iter == 0 && ctx->crc && ctx->hdr->crc32 != 0) {
+        uint32_t got = ctx->crc->crc();
+        ctx->crc_checked = true;
+        ctx->crc_ok      = (got == ctx->hdr->crc32);
+        if (!ctx->crc_ok)
+            Serial.printf("[ANIM] CRC mismatch: got %08lx expected %08lx\n",
+                          (unsigned long)got, (unsigned long)ctx->hdr->crc32);
+        else
+            Serial.printf("[ANIM] CRC OK (%08lx)\n", (unsigned long)got);
+    }
+
+    // ── Loop or finish ──────────────────────────────────────────────────────
+    // Seamless loop only for self-looping sources (the PSRAM ring, whose loader
+    // rewinds the inner file so bytes keep flowing). Otherwise — or when Loop is
+    // off — signal clean EOF and let the caller decide whether to rewind.
+    if (!(ctx->src_self_loops && g_pbc.loop_enabled)) {
         if (xSemaphoreTake(ctx->sem_free, pdMS_TO_TICKS(500)) == pdTRUE) {
             ctx->slots[slot_idx].state = SLOT_EOF;
             xSemaphoreGive(ctx->sem_ready);
         }
         ctx->ran_to_eof = true;
+        break;
     }
+
+    // Consume the next pass's 512-byte header + frame-size table so the reader
+    // lands exactly on pass N+1's first frame chunk. read_byte drains any bytes
+    // the keyframe parse left in rle.buf, then refills from src.
+    rle.budget_left = -1;
+    uint32_t to_skip = (uint32_t)FBOX_HEADER_SIZE + (uint32_t)ctx->hdr->frame_count * 4u;
+    bool skip_ok = true;
+    for (uint32_t k = 0; k < to_skip; k++) {
+        if (rle.read_byte() < 0) { skip_ok = false; break; }
+    }
+    if (!skip_ok) {
+        err_state = rle.err ? SLOT_UNDER : SLOT_ERR;
+        Serial.printf("[ANIM] producer: loop-boundary read failed (state=%u)\n", err_state);
+        if (xSemaphoreTake(ctx->sem_free, pdMS_TO_TICKS(500)) == pdTRUE) {
+            ctx->slots[slot_idx].state = err_state;
+            xSemaphoreGive(ctx->sem_ready);
+        }
+        break;
+    }
+
+    // Reset the XOR baseline so pass N+1's leading I-frame reconstructs exactly
+    // as it did on a fresh start (frame_4bpp was calloc'd to 0 for pass 0).
+    memset(ctx->frame_4bpp, 0, PIXEL_COUNT >> 1);
+    loop_iter++;
+    }   // outer for(;;)
 
 producer_exit:
     vTaskDelete(NULL);
@@ -1096,7 +1209,7 @@ producer_exit:
 
 } // namespace
 
-PlaybackResult playFboxAnimation(FboxSource &src)
+PlaybackResult playFboxAnimation(FboxSource &src, bool source_self_loops)
 {
     FboxHeader hdr;
     uint32_t crc_seed = 0;
@@ -1124,6 +1237,13 @@ PlaybackResult playFboxAnimation(FboxSource &src)
     // subsequent bytes go through FboxSourceCrc which accumulates as the
     // producer reads.
     FboxSourceCrc crc_src(&src, crc_seed);
+
+    // Release the UI's lazy SFX I2S session NOW, before the big internal
+    // allocations below. Its I2S DMA descriptors live in internal RAM; left
+    // resident they fragment the heap enough that the 115 KB internal
+    // frame_4bpp calloc fails (OOM). The audio channel is reinstalled for this
+    // file's own stream further down.
+    ui::suspendSfxSession();
 
     // Read frame size table into PSRAM — producer needs per-frame chunk sizes
     // to compute video budget and detect chunk boundaries.
@@ -1182,12 +1302,36 @@ PlaybackResult playFboxAnimation(FboxSource &src)
     //     PSRAM (3 × 230,400 = 690 KB doesn't fit in 327 KB internal) and must
     //     be 32-byte aligned for esp_cache_msync. PIXEL_COUNT is already a
     //     multiple of 32, so heap_caps_aligned_alloc covers both ends.
-    uint8_t *frame_4bpp = (uint8_t *)heap_caps_calloc(PIXEL_COUNT >> 1, 1, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (!frame_4bpp) {
-        Serial.printf("[ANIM] internal alloc for frame_4bpp (%lu B) failed\n",
-                      (unsigned long)(PIXEL_COUNT >> 1));
-        free(frame_sizes);
-        return PlaybackResult::OOM;
+    memReport("anim-start");
+    // Borrow the internal decode buffer reserved at boot (memReservePlaybackScratch),
+    // so the fast internal path is guaranteed regardless of runtime fragmentation.
+    // owns_4bpp stays false for the reserved buffer — it must never be freed here.
+    // Safety net only if the reservation failed: try internal → reclaim+retry →
+    // PSRAM (degraded speed) so playback never hard-fails on memory.
+    uint8_t *frame_4bpp = (uint8_t *)memPlaybackScratch();
+    bool     owns_4bpp  = false;
+    if (frame_4bpp && memPlaybackScratchSize() >= (size_t)(PIXEL_COUNT >> 1)) {
+        memset(frame_4bpp, 0, PIXEL_COUNT >> 1);   // reserved buffer is reused; clear it
+    } else {
+        frame_4bpp = (uint8_t *)heap_caps_calloc(PIXEL_COUNT >> 1, 1,
+                                                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!frame_4bpp) {
+            memReclaim();
+            frame_4bpp = (uint8_t *)heap_caps_calloc(PIXEL_COUNT >> 1, 1,
+                                                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        }
+        if (!frame_4bpp) {
+            Serial.println("[ANIM] frame_4bpp: no internal RAM — falling back to PSRAM (slower)");
+            frame_4bpp = (uint8_t *)heap_caps_calloc(PIXEL_COUNT >> 1, 1,
+                                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        }
+        if (!frame_4bpp) {
+            Serial.printf("[ANIM] alloc for frame_4bpp (%lu B) failed\n",
+                          (unsigned long)(PIXEL_COUNT >> 1));
+            free(frame_sizes);
+            return PlaybackResult::OOM;
+        }
+        owns_4bpp = true;
     }
     Slot slots[RING_SLOTS] = {};
     for (int i = 0; i < RING_SLOTS; i++) {
@@ -1200,7 +1344,7 @@ PlaybackResult playFboxAnimation(FboxSource &src)
             32, PIXEL_COUNT, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
         if (!slots[i].frame_buf) {
             for (int j = 0; j < i; j++) free(slots[j].frame_buf);
-            free(frame_4bpp);
+            if (owns_4bpp) free(frame_4bpp);
             free(frame_sizes);
             return PlaybackResult::OOM;
         }
@@ -1229,7 +1373,7 @@ PlaybackResult playFboxAnimation(FboxSource &src)
             if (audio_block_scratch) free(audio_block_scratch);
             if (pcm_scratch) free(pcm_scratch);
             for (int i = 0; i < RING_SLOTS; i++) free(slots[i].frame_buf);
-            free(frame_4bpp);
+            if (owns_4bpp) free(frame_4bpp);
             free(frame_sizes);
             return PlaybackResult::OOM;
         }
@@ -1242,6 +1386,8 @@ PlaybackResult playFboxAnimation(FboxSource &src)
 
     ProducerCtx pctx = {};
     pctx.src         = &crc_src;
+    pctx.crc         = &crc_src;
+    pctx.src_self_loops = source_self_loops;
     pctx.hdr         = &hdr;
     pctx.clut_lut    = clut_lut;
     pctx.clut_pair   = clut_pair;
@@ -1282,8 +1428,28 @@ PlaybackResult playFboxAnimation(FboxSource &src)
     }
 
     // Stack 16 KB: producer's FboxRleReader local (≈4 KB buf) + decode helpers
-    // + ADPCM decoder + FreeRTOS overhead.
-    xTaskCreatePinnedToCore(producerTask, "fbox_dec", 16384, &pctx, 2, &pctx.task, 0);
+    // + ADPCM decoder + FreeRTOS overhead. Prefer the stack reserved at boot
+    // (memReservePlaybackScratch) so the task is guaranteed to spawn even when
+    // the heap is fragmented; fall back to a dynamic stack if the reservation
+    // failed. The crash guard below still covers a total failure.
+    pctx.task = nullptr;
+    BaseType_t prod_ok = pdFAIL;
+    if (memProducerStack()) {
+        pctx.task = xTaskCreateStaticPinnedToCore(
+            producerTask, "fbox_dec", memProducerStackWords(), &pctx, 2,
+            (StackType_t *)memProducerStack(), (StaticTask_t *)memProducerTCB(), 0);
+        prod_ok = pctx.task ? pdPASS : pdFAIL;
+    } else {
+        prod_ok = xTaskCreatePinnedToCore(producerTask, "fbox_dec", 16384, &pctx, 2,
+                                          &pctx.task, 0);
+    }
+    if (prod_ok != pdPASS) {
+        // No RAM for the stack. Bail cleanly rather than entering the consumer
+        // loop and asserting on a null task handle.
+        pctx.task = nullptr;
+        Serial.println("[ANIM] producer task spawn failed — insufficient internal RAM");
+        memReport("anim-spawn-fail");
+    }
 
     Serial.printf("[ANIM] play %u frames @ %u fps (audio=%s, samples/frame=%u)\n",
                   hdr.frame_count, hdr.fps,
@@ -1293,8 +1459,8 @@ PlaybackResult playFboxAnimation(FboxSource &src)
     uint32_t t_spi_total = 0;
     uint32_t t_wait_total = 0;
 
-    PlaybackResult result = PlaybackResult::OK;
-    bool consumer_running = true;
+    PlaybackResult result = (prod_ok == pdPASS) ? PlaybackResult::OK : PlaybackResult::OOM;
+    bool consumer_running = (prod_ok == pdPASS);   // no producer → skip the consumer loop
     int slot_idx = 0;
     uint16_t frames_drawn = 0;
 
@@ -1326,6 +1492,11 @@ PlaybackResult playFboxAnimation(FboxSource &src)
         // Reuse the held slot, redraw + menu, pace and poll. Don't take a
         // new slot from sem_ready; producer will fill and block on sem_free.
         if (g_pbc.paused && held_slot) {
+            // On the transition into pause (prev_paused not yet set), drop the
+            // buffered audio so it doesn't play on for ~660 ms and so resume
+            // re-syncs to live frames instead of draining a stale backlog.
+            if (!prev_paused && audio_streaming) flushI2SStreaming();
+
             displayAnimFrameBegin();
             displayAnimWriteFrame(held_slot->frame_buf);
             if (g_pbc.menu_open) pb_draw_menu(g_pbc);
@@ -1338,13 +1509,16 @@ PlaybackResult playFboxAnimation(FboxSource &src)
                 if (!g_pbc.menu_open) g_pbc.menu_open = true;
                 else                  pb_handle_tap(g_pbc, touchX, touchY);
             }
-            // Continuous volume drag (only when the menu was already open, so
-            // the gesture that opens the menu can't also fling the volume).
+            // Continuous slider drags (only when the menu was already open, so
+            // the gesture that opens the menu can't also fling a slider).
             // Live (no flash) per frame; persist once on release.
-            if (cur && wasOpen &&
-                pb_rect_contains(PB_VOL_X, PB_VOL_Y, PB_VOL_W, PB_VOL_H, touchX, touchY))
-                setI2SVolumeLive(pb_vol_pct_from_x(touchX));
-            if (!cur && last_touch_active) commitI2SVolume();
+            if (cur && wasOpen) {
+                if (pb_rect_contains(PB_VOL_X, PB_VOL_Y, PB_VOL_W, PB_VOL_H, touchX, touchY))
+                    setI2SVolumeLive(pb_vol_pct_from_x(touchX));
+                if (pb_rect_contains(PB_VOL_X, PB_BRT_Y, PB_VOL_W, PB_VOL_H, touchX, touchY))
+                    setDisplayBrightnessLive(pb_vol_pct_from_x(touchX));
+            }
+            if (!cur && last_touch_active) { commitI2SVolume(); commitDisplayBrightness(); }
             last_touch_active = cur;
 
             if (g_pbc.stop_requested) {
@@ -1441,13 +1615,16 @@ PlaybackResult playFboxAnimation(FboxSource &src)
             if (!g_pbc.menu_open) g_pbc.menu_open = true;
             else                  pb_handle_tap(g_pbc, touchX, touchY);
         }
-        // Continuous volume drag (only when the menu was already open, so the
-        // gesture that opens the menu can't also fling the volume). Live (no
+        // Continuous slider drags (only when the menu was already open, so the
+        // gesture that opens the menu can't also fling a slider). Live (no
         // flash) per frame; persist once on release.
-        if (cur && wasOpen &&
-            pb_rect_contains(PB_VOL_X, PB_VOL_Y, PB_VOL_W, PB_VOL_H, touchX, touchY))
-            setI2SVolumeLive(pb_vol_pct_from_x(touchX));
-        if (!cur && last_touch_active) commitI2SVolume();
+        if (cur && wasOpen) {
+            if (pb_rect_contains(PB_VOL_X, PB_VOL_Y, PB_VOL_W, PB_VOL_H, touchX, touchY))
+                setI2SVolumeLive(pb_vol_pct_from_x(touchX));
+            if (pb_rect_contains(PB_VOL_X, PB_BRT_Y, PB_VOL_W, PB_VOL_H, touchX, touchY))
+                setDisplayBrightnessLive(pb_vol_pct_from_x(touchX));
+        }
+        if (!cur && last_touch_active) { commitI2SVolume(); commitDisplayBrightness(); }
         last_touch_active = cur;
 
         if (g_pbc.stop_requested) {
@@ -1485,13 +1662,15 @@ PlaybackResult playFboxAnimation(FboxSource &src)
     // Release the held slot before tearing down semaphores.
     if (held_slot) { xSemaphoreGive(sem_free); held_slot = nullptr; }
 
-    // Tear down producer
+    // Tear down producer (only if it actually spawned).
     cancel = true;
-    // Drain any pending sem_free posts so the producer can wake and exit.
-    for (int i = 0; i < RING_SLOTS + 1; i++) xSemaphoreGive(sem_free);
-    for (int i = 0; i < 200; i++) {
-        if (eTaskGetState(pctx.task) == eDeleted) break;
-        vTaskDelay(pdMS_TO_TICKS(5));
+    if (pctx.task) {
+        // Drain any pending sem_free posts so the producer can wake and exit.
+        for (int i = 0; i < RING_SLOTS + 1; i++) xSemaphoreGive(sem_free);
+        for (int i = 0; i < 200; i++) {
+            if (eTaskGetState(pctx.task) == eDeleted) break;
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
     }
 
     uint32_t elapsed_ms = millis() - t_start;
@@ -1520,29 +1699,26 @@ PlaybackResult playFboxAnimation(FboxSource &src)
     // pushI2SSamples can race the teardown.
     if (audio_streaming) stopI2SStreaming();
 
-    // CRC32 verification (header value 0 = skip). Producer naturally drained
-    // every byte (header → frame_table → frames → keyframe table) through crc_src,
-    // so the accumulator covers the whole file.
-    if (hdr.crc32 != 0 && pctx.ran_to_eof) {
-        uint32_t got = crc_src.crc();
-        if (got != hdr.crc32) {
-            Serial.printf("[ANIM] CRC mismatch: got %08lx expected %08lx\n",
-                          (unsigned long)got, (unsigned long)hdr.crc32);
-            if (result == PlaybackResult::OK) result = PlaybackResult::CRC_MISMATCH;
-        } else {
-            Serial.printf("[ANIM] CRC OK (%08lx)\n", (unsigned long)got);
-        }
-    }
+    // CRC32 verification ran inside the producer at the end of pass 0 (the only
+    // pass whose accumulator spans exactly [64..EOF]; later passes re-read the
+    // header through crc_src and desync it). Surface a mismatch as the result.
+    if (pctx.crc_checked && !pctx.crc_ok && result == PlaybackResult::OK)
+        result = PlaybackResult::CRC_MISMATCH;
 
     for (int i = 0; i < RING_SLOTS; i++) free(slots[i].frame_buf);
     if (audio_block_scratch) free(audio_block_scratch);
     if (pcm_scratch) free(pcm_scratch);
-    free(frame_4bpp);
+    if (owns_4bpp) free(frame_4bpp);   // reserved buffer (owns_4bpp=false) is kept
     free(frame_sizes);
     vSemaphoreDelete(sem_free);
     vSemaphoreDelete(sem_ready);
+    memReport("anim-end");
 
-    changeScreenContext(SCREEN_CANVAS);
+    // NOTE: no changeScreenContext here. This returns once per loop iteration,
+    // and repainting the canvas UI between iterations flashed the screen during
+    // the rewind/rebuild gap. The screen switch now happens once in
+    // playFboxAnimationFromSD after loop_play exits — between loops the LT7680
+    // just holds the last frame in SDRAM instead.
     return result;
 }
 
@@ -1554,21 +1730,25 @@ PlaybackResult playFboxAnimationFromSD(const char *path, uint32_t ring_bytes)
         return PlaybackResult::READ_UNDERRUN;
     }
 
-    // Loop control:
+    // Loop control. When `self_loops` is true the source is a seamless
+    // repeating stream (the looping ring), so playFboxAnimation loops with no
+    // rebuild and returns OK only once Loop is toggled off mid-play; no rewind
+    // is needed. Otherwise (direct SD fallback) we rewind+rebuild per pass:
     //   OK            → rewind & loop iff the playback menu's Loop toggle is on.
     //   USER_RESTART  → always rewind & loop (user explicitly asked).
     //   USER_CANCELLED → break (user hit Stop).
     //   anything else → break (don't spin on a broken file or a stuck loader).
-    auto loop_play = [](FboxSource &src, const char *label) {
+    auto loop_play = [](FboxSource &src, const char *label, bool self_loops) {
         PlaybackResult result;
         uint32_t iter = 0;
         while (true) {
-            result = playFboxAnimation(src);
+            result = playFboxAnimation(src, self_loops);
             Serial.printf("[ANIM] %s loop iter=%lu result=%d (loop=%d)\n",
                           label, (unsigned long)iter, (int)result,
                           g_pbc.loop_enabled ? 1 : 0);
             bool should_rewind = (result == PlaybackResult::USER_RESTART) ||
-                                 (result == PlaybackResult::OK && g_pbc.loop_enabled);
+                                 (!self_loops && result == PlaybackResult::OK &&
+                                  g_pbc.loop_enabled);
             if (!should_rewind) break;
             if (!src.reset()) {
                 Serial.printf("[ANIM] %s loop: source reset failed; stopping\n", label);
@@ -1582,20 +1762,29 @@ PlaybackResult playFboxAnimationFromSD(const char *path, uint32_t ring_bytes)
     FboxSourceRingBuffered buf_src(&sd_src, ring_bytes);
     if (!buf_src.ok()) {
         Serial.println("playFboxAnimationFromSD: ring alloc failed; using direct SD source");
-        return loop_play(sd_src, "sd");
+        PlaybackResult result = loop_play(sd_src, "sd", /*self_loops=*/false);
+        changeScreenContext(SCREEN_CANVAS);
+        return result;
     }
+    // Seamless looping: the loader rewinds the inner file on EOF so the byte
+    // stream never drains at the loop boundary, and the producer loops without
+    // tearing down the pipeline. (See playFboxAnimation / producerTask.)
+    buf_src.setLoop(true);
     Serial.printf("[ANIM] ring buffer: %lu KB PSRAM, async SD loader on core 1\n",
                   (unsigned long)(ring_bytes / 1024));
-    PlaybackResult result = loop_play(buf_src, "ring");
+    PlaybackResult result = loop_play(buf_src, "ring", /*self_loops=*/true);
     Serial.printf("[ANIM] ring stalls=%u stall_time=%llums (cumulative across loops)\n",
                   buf_src.stallCount(), buf_src.stallTimeUs() / 1000);
+    // Switch back to the canvas UI once, after all loop iterations finish —
+    // not between them (see the note in playFboxAnimation's teardown).
+    changeScreenContext(SCREEN_CANVAS);
     return result;
 }
 
-std::vector<std::string> sdGetFboxFiles()
+static std::vector<std::string> sdListFboxDir(const char *dirpath)
 {
     std::vector<std::string> fileNames;
-    DIR *dir = opendir("/sd/sketches/saved");
+    DIR *dir = opendir(dirpath);
     if (!dir) return fileNames;
     struct dirent *entry;
     while ((entry = readdir(dir)) != nullptr) {
@@ -1606,4 +1795,14 @@ std::vector<std::string> sdGetFboxFiles()
     }
     closedir(dir);
     return fileNames;
+}
+
+std::vector<std::string> sdGetFboxFiles()
+{
+    return sdListFboxDir("/sd/sketches/saved");
+}
+
+std::vector<std::string> sdGetReceivedFboxFiles()
+{
+    return sdListFboxDir("/sd/sketches/received");
 }
