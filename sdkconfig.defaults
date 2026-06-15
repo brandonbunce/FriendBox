@@ -76,6 +76,13 @@ CONFIG_FATFS_USE_FASTSEEK=y
 CONFIG_ESP_TLS_USING_MBEDTLS=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+# Allocate mbedTLS buffers from PSRAM, not internal DRAM. A TLS handshake's
+# in/out content buffers (16 KB + 4 KB) plus session state were eating ~38 KB
+# internal during the pairing handshake — measured to fragment the internal heap
+# below the 16 KB the ui_loop task stack needs, so the UI task failed to spawn.
+# DYNAMIC_BUFFER additionally frees the large record buffers between handshakes.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 
 #
 # HTTP client component
@@ -86,10 +93,20 @@ CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
 # lwIP — give us enough sockets for download + future API calls
 #
 CONFIG_LWIP_MAX_SOCKETS=10
-# WiFi + lwIP buffers already live in PSRAM (CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP
-# is enabled by default with SPIRAM_USE_MALLOC). The internal-RAM crunch during
-# playback is solved by reserving the decode buffer + producer task stack at boot
-# (see src/mem.cpp), not by further WiFi tuning.
+
+#
+# WiFi buffers — internal-RAM budget.
+# SPIRAM_TRY_ALLOCATE_WIFI_LWIP moves *dynamic* WiFi/lwIP buffers to PSRAM, but
+# the *static* RX/TX buffers stay in internal DRAM (they're DMA pools). Measured
+# at runtime, WiFi was consuming ~72 KB internal, which (on top of the boot
+# reservations in src/mem.cpp) left no contiguous 16 KB block for the ui_loop
+# task stack — it failed to spawn and the UI never ran (largest free = 15360 B).
+# Move TX buffers to the dynamic (PSRAM-capable) pool and trim the static RX pool
+# + BA window to claw that internal RAM back. Cost: slightly lower peak WiFi
+# throughput on downloads.
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER=y
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_RX_BA_WIN=16
 
 #
 # Compiler

@@ -98,6 +98,12 @@ void displayAnimFrameEnd();
 void displayAnimCanvasToMenuCache();
 void displayAnimBlitMenuToBack(int x, int y, int w, int h);
 
+/** Atomically show an off-screen slot the caller has fully composed. Waits for
+ *  VBlank, re-asserts the scanout config, then repoints the main-image address
+ *  at `slot` (the same glitch-free flip displayAnimFrameEnd() uses). Lets a
+ *  caller double-buffer arbitrary content without writing into the live slot. */
+void displayPresentSlot(uint32_t slot);
+
 /** Write one scanline using BTE hardware fills for runs of ≥5 same-color
  *  pixels and raw SPI writes for mixed segments. Must be called between
  *  displayFrameBegin() / displayFrameEnd(). Significantly faster than

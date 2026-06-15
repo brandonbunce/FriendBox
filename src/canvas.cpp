@@ -19,7 +19,11 @@ uint16_t draw_color_palette[16] = {
     0x3249, // Dark Green (9)
     0x4443, // Green (10)
     0xa665, // Slime Green (11)
-    0x1926, // Night Blue (12)
+    0x2108, // Night Blue (12) — retuned for the panel's hardwired RGB332 8bpp
+            // path. The true navy #1B2632 quantizes to (0,36,0) — pure green —
+            // because RGB332's 2-bit blue drops it. 0x2108 lands on RGB332 cell
+            // (1,1,1) -> shown ~(36,36,85), a muted blue that reads as night blue.
+            // (Cleaner/darker pure-blue alt: 0x0008 -> (0,0,85).)
     0x02b0, // Sea Blue (13)
     0x351d, // Sky Blue (14)
     0xb6dd  // Cloud Blue (15)

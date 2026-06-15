@@ -1,6 +1,8 @@
 #include "audio_i2s.hpp"
 #include "nvs_store.hpp"
+#include "mem.hpp"
 #include <driver/i2s_std.h>
+#include <driver/gpio.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -25,6 +27,24 @@ static uint32_t             s_drops        = 0;
 // start/stop cycles. Atomic 16-bit read/write on Xtensa, no lock needed.
 static volatile uint16_t    s_volume_q15   = 32768;
 static volatile uint8_t     s_volume_pct   = 100;
+
+void holdI2SDacPinsLow(void)
+{
+    const uint64_t mask = (1ULL << I2S_BCLK_PIN) |
+                          (1ULL << I2S_LRCLK_PIN) |
+                          (1ULL << I2S_DOUT_PIN);
+    gpio_config_t cfg = {
+        .pin_bit_mask = mask,
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&cfg);
+    gpio_set_level((gpio_num_t)I2S_BCLK_PIN, 0);
+    gpio_set_level((gpio_num_t)I2S_LRCLK_PIN, 0);
+    gpio_set_level((gpio_num_t)I2S_DOUT_PIN, 0);
+}
 
 static bool installChannel(uint32_t sample_rate)
 {
@@ -182,8 +202,21 @@ bool startI2SStreaming(uint32_t sample_rate, uint16_t samples_per_frame)
     // main task's 1) so DMA refills win brief CPU contention.
     // 8 KB stack: i2s_channel_write + ESP-IDF logging frames are surprisingly
     // deep; 4 KB had overflowed and trampled task-WDT bookkeeping previously.
-    BaseType_t ok = xTaskCreatePinnedToCore(writerTask, "i2s_wr", 8192, nullptr,
-                                            3, &s_writer_task, 1);
+    // Prefer the stack reserved at boot (memReservePlaybackScratch) so the task
+    // spawns even when WiFi/TLS have fragmented internal RAM — a dynamic alloc
+    // here was failing during boot. Fall back to a dynamic stack if the boot
+    // reservation failed. stopI2SStreaming() confirms the previous task fully
+    // terminated (eDeleted) before this reuses the static TCB.
+    BaseType_t ok = pdFAIL;
+    if (memI2SWriterStack()) {
+        s_writer_task = xTaskCreateStaticPinnedToCore(
+            writerTask, "i2s_wr", memI2SWriterStackWords(), nullptr, 3,
+            (StackType_t *)memI2SWriterStack(), (StaticTask_t *)memI2SWriterTCB(), 1);
+        ok = s_writer_task ? pdPASS : pdFAIL;
+    } else {
+        ok = xTaskCreatePinnedToCore(writerTask, "i2s_wr", 8192, nullptr,
+                                     3, &s_writer_task, 1);
+    }
     if (ok != pdPASS) {
         puts("[I2S] writer task spawn failed");
         vStreamBufferDelete(s_stream); s_stream = nullptr;
@@ -191,6 +224,7 @@ bool startI2SStreaming(uint32_t sample_rate, uint16_t samples_per_frame)
         i2s_channel_disable(s_tx_chan);
         i2s_del_channel(s_tx_chan);
         s_tx_chan = nullptr;
+        holdI2SDacPinsLow();   // del_channel left the pins floating
         s_writer_done = true;
         return false;
     }
@@ -228,13 +262,18 @@ void stopI2SStreaming()
     if (s_writer_done && !s_tx_chan) return;
 
     s_stop_writer = true;
-    // Wake writer if it's blocked in xStreamBufferReceive.
+    // Wake writer if it's blocked in xStreamBufferReceive, then wait for it to
+    // fully terminate (eDeleted) before reusing its static TCB next session —
+    // mirrors the fbox_dec producer teardown in io.cpp. The writer self-deletes
+    // after setting s_writer_done; eDeleted is the stronger "idle has reclaimed
+    // it" signal that makes static reuse safe.
     if (s_stream) xStreamBufferReset(s_stream);
-    for (int i = 0; i < 50 && !s_writer_done; i++) {
-        vTaskDelay(pdMS_TO_TICKS(10));
+    for (int i = 0; i < 140 && s_writer_task &&
+                    eTaskGetState(s_writer_task) != eDeleted; i++) {
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
-    if (!s_writer_done) {
-        puts("[I2S] writer task did not exit within 500 ms");
+    if (s_writer_task && eTaskGetState(s_writer_task) != eDeleted) {
+        puts("[I2S] writer task did not exit within 700 ms");
     }
     s_writer_task = nullptr;
 
@@ -244,6 +283,9 @@ void stopI2SStreaming()
         i2s_channel_disable(s_tx_chan);
         i2s_del_channel(s_tx_chan);
         s_tx_chan = nullptr;
+        // del_channel releases the pins to a floating state — re-drive them LOW
+        // so the DAC input network can't oscillate and corrupt PSRAM.
+        holdI2SDacPinsLow();
     }
     if (s_drops > 0) {
         printf("[I2S] total push drops: %u\n", s_drops);

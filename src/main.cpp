@@ -180,6 +180,12 @@ static void uiLoopTask(void *)
 
 extern "C" void app_main(void)
 {
+    // FIRST, before anything else: drive the I2S DAC pins (GPIO 38/39/40) LOW.
+    // Left floating, the external NS4168 DAC's input network oscillates and
+    // corrupts PSRAM, surfacing as crashes in seemingly unrelated code paths.
+    // Re-applied after every channel teardown (see stopI2SStreaming).
+    holdI2SDacPinsLow();
+
     // NVS, esp_netif, and the default event loop must come up early so
     // any later component (WiFi, NvsStore, esp_http_client) can use them.
     esp_err_t nvs_err = nvs_flash_init();
@@ -218,5 +224,13 @@ extern "C" void app_main(void)
     // the stack, then descends the f_open → FATFS → sdmmc → heap chain on top.
     // 8 KB overflowed into the heap (StoreProhibited in the allocator); 16 KB
     // leaves comfortable headroom.
-    xTaskCreatePinnedToCore(uiLoopTask, "ui_loop", 16384, nullptr, 1, nullptr, 1);
+    BaseType_t ui_ok = xTaskCreatePinnedToCore(uiLoopTask, "ui_loop", 16384,
+                                               nullptr, 1, nullptr, 1);
+    if (ui_ok != pdPASS) {
+        // The whole UI lives in this task; a silent failure here looks like a
+        // dead screen with the rest of the system (auth, WiFi) still running.
+        // Surface it loudly with the memory state that caused it.
+        printf("[ui] FATAL: ui_loop task spawn failed (internal RAM too low)\n");
+        memReport("ui-task-fail");
+    }
 }

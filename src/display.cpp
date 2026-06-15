@@ -158,6 +158,19 @@ void displayAnimFrameEnd()
     tft.endWrite();
 }
 
+void displayPresentSlot(uint32_t slot)
+{
+    // Glitch-free page flip for callers that compose a complete frame into an
+    // off-screen slot and then want it shown atomically (e.g. the home-screen
+    // background cross-fade). Same VBlank-before-MISA ordering and scanout
+    // re-assert as displayAnimFrameEnd() — see the notes there.
+    tft.startWrite();
+    pcba_panel()->waitVSync();
+    pcba_panel()->reassertScanoutConfig(TFT_HOR_RES, TFT_VER_RES);
+    pcba_panel()->setMainImageAddress(slot);
+    tft.endWrite();
+}
+
 // BTE fill threshold: runs shorter than this are batched with adjacent literals
 // for a single raw write. Break-even is ~5 pixels; 8 gives comfortable margin.
 static constexpr int BTE_RUN_THRESHOLD = 8;

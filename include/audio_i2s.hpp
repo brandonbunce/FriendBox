@@ -8,6 +8,14 @@
 #define I2S_LRCLK_PIN 39
 #define I2S_DOUT_PIN  40
 
+/* Drive the I2S DAC pins (BCLK/LRCLK/DOUT) as outputs held LOW. MUST be called
+ * at the very top of app_main before anything else, AND after every channel
+ * teardown: a floating input network on the external NS4168 DAC oscillates and
+ * corrupts PSRAM, causing crashes in seemingly unrelated code paths (IDLE
+ * task-WDT walks). i2s_del_channel releases the pins to a floating state, so the
+ * hold must be re-applied whenever the channel is torn down. */
+void holdI2SDacPinsLow(void);
+
 /* Streaming I2S API for v4 playback. Producer task pushes one frame's worth of
  * mono PCM per video frame via pushI2SSamples(); writer task drains the stream
  * buffer, expands mono→stereo, and writes to the I2S TX DMA. */

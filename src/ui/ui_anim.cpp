@@ -42,7 +42,10 @@ static void composeScratch()
     tft.setCanvasAddress(shownSlot());   // draw target back to the live slot
 }
 
-static void blitSlideStep(int ox, int oy)
+// Compose one slide frame (bg fill + the new screen at an eased offset) into an
+// off-screen slot. The caller page-flips to it; nothing is drawn into the live
+// slot, so there is no fill-then-blit flicker.
+static void slideCompose(uint32_t dst, int ox, int oy)
 {
     const int W = TFT_HOR_RES, H = TFT_VER_RES;
     int srcX = ox < 0 ? -ox : 0;
@@ -51,17 +54,27 @@ static void blitSlideStep(int ox, int oy)
     int dstY = oy > 0 ?  oy : 0;
     int w = W - (ox < 0 ? -ox : ox);
     int h = H - (oy < 0 ? -oy : oy);
-    if (w <= 0 || h <= 0) return;
 
-    tft.fillScreen(bgColor());           // active draw target == shown slot
-    tft.blitFrames(SCRATCH, (uint16_t)srcX, (uint16_t)srcY,
-                   shownSlot(), (uint16_t)dstX, (uint16_t)dstY,
-                   (uint16_t)w, (uint16_t)h);
+    tft.setCanvasAddress(dst);
+    tft.fillScreen(bgColor());
+    if (w > 0 && h > 0)
+        tft.blitFrames(SCRATCH, (uint16_t)srcX, (uint16_t)srcY,
+                       dst, (uint16_t)dstX, (uint16_t)dstY,
+                       (uint16_t)w, (uint16_t)h);
 }
 
 static void runSlide(AnimKind k)
 {
     const int W = TFT_HOR_RES, H = TFT_VER_RES;
+    // Two off-screen present buffers to ping-pong. SLOT_ANIM_B and SLOT_MENU are
+    // both idle on the live display outside fbox playback (no transition fires
+    // mid-playback), and both are distinct from SCRATCH (SLOT_ANIM, holding the
+    // new screen) and from SLOT_CANVAS (the underlying sketch an overlay
+    // transition must preserve). NOTE: SLOT_MENU also backs the playback menu's
+    // render cache, so transitions clobber it — playFboxAnimation invalidates
+    // that cache (g_pbc_cache.valid) per call to compensate.
+    const uint32_t PRESENT[2] = { LT7680_SLOT_ANIM_B, LT7680_SLOT_MENU };
+    int pp = 0;
     for (int s = 1; s <= STEPS; s++) {
         float lin = (float)s / STEPS;
         float p = (k == ANIM_BOUNCE) ? easeOutBack(lin) : easeOutCubic(lin);
@@ -76,25 +89,46 @@ static void runSlide(AnimKind k)
             case ANIM_BOUNCE:            oy = (int)( rem * H); break;
             default: break;
         }
-        blitSlideStep(ox, oy);
+        uint32_t back = PRESENT[pp];
+        slideCompose(back, ox, oy);      // build the frame off-screen
+        displayPresentSlot(back);        // atomic VBlank-synced page flip
+        pp ^= 1;
         delay(STEP_MS);
     }
+    // Settle: land the fully-resolved new screen in the real shown slot (still
+    // off-screen — a PRESENT buffer is live), then flip back to it.
+    tft.setCanvasAddress(shownSlot());
     tft.blitFrames(SCRATCH, 0, 0, shownSlot(), 0, 0, (uint16_t)W, (uint16_t)H);
+    displayPresentSlot(shownSlot());
 }
 
 static void runFade()
 {
     const int W = TFT_HOR_RES, H = TFT_VER_RES;
+    // Same off-screen ping-pong as runSlide. The old screen stays untouched in
+    // shownSlot() for the whole loop, so it serves as the blend's fixed S0
+    // source while SCRATCH (the new screen) is S1. The LT7680 opacity blends
+    // DT = S0*(1-a) + S1*a, so a:0->31 dissolves old -> new (not the reverse the
+    // old in-place version assumed).
+    const uint32_t PRESENT[2] = { LT7680_SLOT_ANIM_B, LT7680_SLOT_MENU };
+    int pp = 0;
     for (int s = 1; s <= STEPS; s++) {
         uint8_t a = (uint8_t)((31 * s) / STEPS);
-        // DT = SCRATCH*alpha + shown*(1-alpha): cross-fade old -> new.
-        tft.blitFramesAlpha(SCRATCH, 0, 0,
-                            shownSlot(), 0, 0,
-                            shownSlot(), 0, 0,
+        uint32_t back = PRESENT[pp];
+        tft.blitFramesAlpha(shownSlot(), 0, 0,
+                            SCRATCH, 0, 0,
+                            back, 0, 0,
                             (uint16_t)W, (uint16_t)H, a);
+        displayPresentSlot(back);
+        pp ^= 1;
         delay(STEP_MS);
     }
+    // Settle: pure new screen into the real shown slot (off-screen — a PRESENT
+    // buffer is live), then flip back to it. Alpha tops out at 31/32, so this
+    // also crisps up the final ~3% the dissolve can't reach.
+    tft.setCanvasAddress(shownSlot());
     tft.blitFrames(SCRATCH, 0, 0, shownSlot(), 0, 0, (uint16_t)W, (uint16_t)H);
+    displayPresentSlot(shownSlot());
 }
 
 void animPlayEnter(AnimKind k)

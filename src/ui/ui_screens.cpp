@@ -241,26 +241,48 @@ static void homeTick()
     if (millis() - s_homeLastSwitch < HOME_HOLD_MS) return;
 
     int next = (s_homeIdx + 1) % (int)s_homeFiles.size();
-    uint32_t nextSlot = (s_homeBgSlot == LT7680_SLOT_ANIM) ? LT7680_SLOT_ANIM_B
-                                                           : LT7680_SLOT_ANIM;
-    homeDecodeToSlot(s_homeFiles[next].c_str(), nextSlot);
+    uint32_t srcOld = s_homeBgSlot;
+    uint32_t srcNew = (s_homeBgSlot == LT7680_SLOT_ANIM) ? LT7680_SLOT_ANIM_B
+                                                         : LT7680_SLOT_ANIM;
+    homeDecodeToSlot(s_homeFiles[next].c_str(), srcNew);
 
-    // Crossfade nextSlot over the current bg into SLOT_CANVAS, redrawing the
-    // buttons each step so they ride on top of the dissolving background.
-    const int STEPS = 16;
+    // Cross-fade srcOld -> srcNew entirely off-screen. SLOT_ANIM / SLOT_ANIM_B
+    // hold the two pure backgrounds; SLOT_UI / SLOT_CANVAS are the two present
+    // buffers we ping-pong between. Each step composes a complete frame (faded
+    // background + buttons) into the buffer that is NOT currently shown, then
+    // page-flips the panel's main-image address (MISA) to it on VBlank. The
+    // live display therefore only ever jumps from one finished frame to the
+    // next — no erase/repaint flicker on the buttons and no mid-composite
+    // tearing (the old artifacts).
+    //
+    // The LT7680's "memory copy with opacity" blends toward its S1 operand as
+    // the alpha level rises (DT = S0*(1-a) + S1*a), so srcOld=S0 / srcNew=S1
+    // runs the dissolve in the intended old -> new direction.
+    const int STEPS = 15;                       // odd: loop ends showing SLOT_UI
+    uint32_t shown = LT7680_SLOT_CANVAS;        // currently displayed (srcOld bg)
     for (int s = 1; s <= STEPS; s++) {
+        uint32_t back = (shown == LT7680_SLOT_CANVAS) ? LT7680_SLOT_UI
+                                                      : LT7680_SLOT_CANVAS;
         uint8_t a = (uint8_t)((31 * s) / STEPS);
-        tft.blitFramesAlpha(nextSlot, 0, 0, s_homeBgSlot, 0, 0,
-                            LT7680_SLOT_CANVAS, 0, 0,
+        tft.blitFramesAlpha(srcOld, 0, 0, srcNew, 0, 0,
+                            back, 0, 0,
                             TFT_HOR_RES, TFT_VER_RES, a);
-        redraw();
+        tft.setCanvasAddress(back);
+        drawWidgets();                 // buttons composited over the faded bg
+        displayPresentSlot(back);      // atomic VBlank-synced page flip
+        shown = back;
         delay(40);
     }
-    tft.blitFrames(nextSlot, 0, 0, LT7680_SLOT_CANVAS, 0, 0,
-                   TFT_HOR_RES, TFT_VER_RES);
-    redraw();
+    // The last alpha step tops out at 31/32, never a clean 100%. Land a crisp,
+    // fully-resolved srcNew in SLOT_CANVAS — the slot the rest of the home
+    // screen treats as live. SLOT_UI is shown (odd STEPS), so SLOT_CANVAS is
+    // free to compose into without tearing before the final flip.
+    tft.blitFrames(srcNew, 0, 0, LT7680_SLOT_CANVAS, 0, 0, TFT_HOR_RES, TFT_VER_RES);
+    tft.setCanvasAddress(LT7680_SLOT_CANVAS);
+    drawWidgets();
+    displayPresentSlot(LT7680_SLOT_CANVAS);
 
-    s_homeBgSlot     = nextSlot;
+    s_homeBgSlot     = srcNew;
     s_homeIdx        = next;
     s_homeLastSwitch = millis();
 }

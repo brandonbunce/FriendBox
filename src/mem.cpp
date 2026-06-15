@@ -14,9 +14,17 @@ static const size_t kScratchBytes = (480u * 480u) / 2u;   // 115200
 // Producer (fbox_dec) task stack — must match the 16 KB used in io.cpp.
 static const size_t kProdStackBytes = 16384u;
 
+// I2S writer (i2s_wr) task stack — must match the 8 KB used in audio_i2s.cpp.
+// The SFX session spawns this lazily on the first blip, which lands during boot
+// while WiFi + the mbedTLS cert bundle have fragmented internal RAM, so a
+// dynamic alloc was failing ("[I2S] writer task spawn failed" → no UI audio).
+static const size_t kI2SWriterStackBytes = 8192u;
+
 static void  *s_scratch    = nullptr;
 static void  *s_prod_stack = nullptr;     // StackType_t buffer for the producer
 static StaticTask_t s_prod_tcb;           // TCB storage for the static task
+static void  *s_i2s_writer_stack = nullptr;   // StackType_t buffer for i2s_wr
+static StaticTask_t s_i2s_writer_tcb;         // TCB storage for the static task
 
 // ---------------------------------------------------------------------------
 // Eviction registry
@@ -62,11 +70,14 @@ bool memReservePlaybackScratch()
         s_scratch = heap_caps_malloc(kScratchBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!s_prod_stack)
         s_prod_stack = heap_caps_malloc(kProdStackBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!s_i2s_writer_stack)
+        s_i2s_writer_stack = heap_caps_malloc(kI2SWriterStackBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
-    printf("[mem] reserved decode scratch %u B @ %p, producer stack %u B @ %p\n",
+    printf("[mem] reserved decode scratch %u B @ %p, producer stack %u B @ %p, i2s writer stack %u B @ %p\n",
            (unsigned)kScratchBytes, s_scratch,
-           (unsigned)kProdStackBytes, s_prod_stack);
-    if (!s_scratch || !s_prod_stack)
+           (unsigned)kProdStackBytes, s_prod_stack,
+           (unsigned)kI2SWriterStackBytes, s_i2s_writer_stack);
+    if (!s_scratch || !s_prod_stack || !s_i2s_writer_stack)
         printf("[mem] WARNING: a playback reservation FAILED (will fall back at runtime)\n");
     return s_scratch != nullptr;
 }
@@ -77,6 +88,10 @@ size_t memPlaybackScratchSize() { return kScratchBytes; }
 void  *memProducerStack()       { return s_prod_stack; }
 size_t memProducerStackWords()  { return kProdStackBytes / sizeof(StackType_t); }
 void  *memProducerTCB()         { return &s_prod_tcb; }
+
+void  *memI2SWriterStack()      { return s_i2s_writer_stack; }
+size_t memI2SWriterStackWords() { return kI2SWriterStackBytes / sizeof(StackType_t); }
+void  *memI2SWriterTCB()        { return &s_i2s_writer_tcb; }
 
 // ---------------------------------------------------------------------------
 // Eviction registry

@@ -894,6 +894,81 @@ static void pb_draw_menu(const PlaybackController &c)
                               PB_MENU_W + 4, PB_MENU_H + 4);
 }
 
+// ── Responsive input during playback ────────────────────────────────────────
+// Touch is sampled on a fixed ~20 ms cadence regardless of the animation frame
+// rate. The consumer used to poll input exactly once per frame and then sleep
+// the whole frame interval, so a 1 fps clip only sampled touch once per second
+// and a tap registered only if it happened to coincide with that single poll.
+// pb_poll_input() runs one sample + menu interaction and reports whether the
+// composited image changed; pb_paced_wait() spins it in short slices until the
+// frame's pacing target, repainting the held frame + menu only when something
+// actually moved. Everything still runs on the consumer task — the sole owner
+// of the LT7680 SPI bus and the GT911 I2C bus — so no locking is involved.
+
+static const uint32_t PB_INPUT_SLICE_MS = 20;
+
+// One touch sample + playback-menu interaction. Returns true if what's on
+// screen needs recompositing (menu shown/hidden, a button toggled, or a slider
+// dragged). last_touch_active carries press edge-detection across calls.
+static bool pb_poll_input(PlaybackController &c, bool &last_touch_active)
+{
+    handleTouch();
+    bool cur     = (touchZ > 0);
+    bool wasOpen = c.menu_open;
+    bool dirty   = false;
+
+    if (cur && !last_touch_active) {              // rising edge = a tap
+        if (!c.menu_open) c.menu_open = true;     // first tap opens the menu
+        else              pb_handle_tap(c, touchX, touchY);
+        dirty = true;                             // open / button / close all repaint
+    }
+    // Continuous slider drags, only once the menu is already open so the gesture
+    // that opens the menu can't also fling a slider. Live (no NVS write) per
+    // sample; committed once on release.
+    if (cur && wasOpen) {
+        if (pb_rect_contains(PB_VOL_X, PB_VOL_Y, PB_VOL_W, PB_VOL_H, touchX, touchY)) {
+            setI2SVolumeLive(pb_vol_pct_from_x(touchX));        dirty = true;
+        }
+        if (pb_rect_contains(PB_VOL_X, PB_BRT_Y, PB_VOL_W, PB_VOL_H, touchX, touchY)) {
+            setDisplayBrightnessLive(pb_vol_pct_from_x(touchX)); dirty = true;
+        }
+    }
+    if (!cur && last_touch_active) { commitI2SVolume(); commitDisplayBrightness(); }
+    last_touch_active = cur;
+    return dirty;
+}
+
+// Recomposite the currently-held frame plus (if open) the menu overlay, using
+// the normal double-buffered flip so there's no tearing.
+static void pb_repaint_held(PlaybackController &c, Slot *held_slot)
+{
+    if (!held_slot) return;
+    displayAnimFrameBegin();
+    displayAnimWriteFrame(held_slot->frame_buf);
+    if (c.menu_open) pb_draw_menu(c);
+    displayAnimFrameEnd();
+}
+
+// Sleep until `target` (absolute tick), sampling input every PB_INPUT_SLICE_MS
+// so menu interaction is responsive at any frame rate, and repainting only when
+// a sample changed the screen. Always polls at least once (so high frame rates
+// keep their per-frame poll). Returns early on a stop/restart request.
+static void pb_paced_wait(PlaybackController &c, TickType_t target,
+                          Slot *held_slot, bool &last_touch_active)
+{
+    const TickType_t slice = pdMS_TO_TICKS(PB_INPUT_SLICE_MS);
+    for (;;) {
+        if (pb_poll_input(c, last_touch_active))
+            pb_repaint_held(c, held_slot);
+        // Bail the moment an interaction requests pause/stop/restart so the
+        // state change isn't stranded behind the rest of this frame's interval.
+        if (c.paused || c.stop_requested || c.restart_requested) break;
+        int32_t remaining = (int32_t)(target - xTaskGetTickCount());
+        if (remaining <= 0) break;
+        vTaskDelay(remaining < (int32_t)slice ? (TickType_t)remaining : slice);
+    }
+}
+
 namespace {
 
 // Read exactly `n` bytes from src into dst. Returns true on full read.
@@ -1229,10 +1304,6 @@ PlaybackResult playFboxAnimation(FboxSource &src, bool source_self_loops)
     }
     if (hdr.description[0]) Serial.printf("[ANIM] \"%s\"\n", hdr.description);
 
-    // Coarse pause-loop delay (paused branch uses relative pacing). Active
-    // pacing uses absolute-target math below — see prev_wake / pacing_anchor.
-    const uint32_t frame_ms = hdr.fps > 0 ? 1000u / hdr.fps : 100u;
-
     // CRC seed (header bytes [64..511]) was computed by fboxReadHeader. All
     // subsequent bytes go through FboxSourceCrc which accumulates as the
     // producer reads.
@@ -1470,7 +1541,6 @@ PlaybackResult playFboxAnimation(FboxSource &src, bool source_self_loops)
     // pause time doesn't burn into a catch-up burst.
     TickType_t pacing_anchor = xTaskGetTickCount();
     uint32_t   pacing_index  = 0;       // frames completed since anchor reset
-    TickType_t prev_wake     = pacing_anchor;
     bool       prev_paused   = false;
 
     // Reset per-call playback-menu state. loop_enabled persists.
@@ -1478,6 +1548,13 @@ PlaybackResult playFboxAnimation(FboxSource &src, bool source_self_loops)
     g_pbc.paused            = false;
     g_pbc.stop_requested    = false;
     g_pbc.restart_requested = false;
+
+    // Invalidate the menu render cache. SLOT_MENU doubles as a ping-pong present
+    // buffer for UI screen transitions (see ui_anim.cpp), so any screen change
+    // between playbacks leaves a stale screen frame in it. Without this, the
+    // first menu-open of a new playback could pass pb_cache_matches() (valid +
+    // matching paused/loop) and BTE-blit that leftover frame instead of the menu.
+    g_pbc_cache.valid = false;
 
     // held_slot is the most recent non-SKIP slot whose sem_free we have NOT
     // released. While paused, we re-blit this slot's frame_buf every frame so
@@ -1497,29 +1574,17 @@ PlaybackResult playFboxAnimation(FboxSource &src, bool source_self_loops)
             // re-syncs to live frames instead of draining a stale backlog.
             if (!prev_paused && audio_streaming) flushI2SStreaming();
 
-            displayAnimFrameBegin();
-            displayAnimWriteFrame(held_slot->frame_buf);
-            if (g_pbc.menu_open) pb_draw_menu(g_pbc);
-            displayAnimFrameEnd();
-
-            handleTouch();
-            bool cur = (touchZ > 0);
-            bool wasOpen = g_pbc.menu_open;
-            if (cur && !last_touch_active) {
-                if (!g_pbc.menu_open) g_pbc.menu_open = true;
-                else                  pb_handle_tap(g_pbc, touchX, touchY);
+            // Show the paused frame + menu now, then idle here sampling input on
+            // the fast slice cadence until resumed or exited. No video frames
+            // advance, so we only recomposite when an interaction changes the
+            // image (instead of re-blitting on every frame tick as before).
+            pb_repaint_held(g_pbc, held_slot);
+            while (g_pbc.paused) {
+                vTaskDelay(pdMS_TO_TICKS(PB_INPUT_SLICE_MS));
+                if (pb_poll_input(g_pbc, last_touch_active))
+                    pb_repaint_held(g_pbc, held_slot);
+                if (g_pbc.stop_requested || g_pbc.restart_requested) break;
             }
-            // Continuous slider drags (only when the menu was already open, so
-            // the gesture that opens the menu can't also fling a slider).
-            // Live (no flash) per frame; persist once on release.
-            if (cur && wasOpen) {
-                if (pb_rect_contains(PB_VOL_X, PB_VOL_Y, PB_VOL_W, PB_VOL_H, touchX, touchY))
-                    setI2SVolumeLive(pb_vol_pct_from_x(touchX));
-                if (pb_rect_contains(PB_VOL_X, PB_BRT_Y, PB_VOL_W, PB_VOL_H, touchX, touchY))
-                    setDisplayBrightnessLive(pb_vol_pct_from_x(touchX));
-            }
-            if (!cur && last_touch_active) { commitI2SVolume(); commitDisplayBrightness(); }
-            last_touch_active = cur;
 
             if (g_pbc.stop_requested) {
                 Serial.printf("[ANIM] consumer exit: USER_CANCELLED (paused, drawn=%u)\n",
@@ -1535,10 +1600,8 @@ PlaybackResult playFboxAnimation(FboxSource &src, bool source_self_loops)
                 consumer_running = false;
                 break;
             }
-            // Pause uses relative delay — pacing index doesn't advance, so the
-            // active-branch absolute math stays clean. Marker so we can reset
-            // pacing_anchor on the next active iteration.
-            vTaskDelay(pdMS_TO_TICKS(frame_ms));
+            // Resumed. Mark so the next active iteration resets pacing_anchor and
+            // doesn't burst-catch-up for the paused interval.
             prev_paused = true;
             continue;
         }
@@ -1550,7 +1613,6 @@ PlaybackResult playFboxAnimation(FboxSource &src, bool source_self_loops)
             // frames as fast as possible.
             pacing_anchor = xTaskGetTickCount();
             pacing_index  = 0;
-            prev_wake     = pacing_anchor;
             prev_paused   = false;
         }
         uint32_t t_wait_start = millis();
@@ -1607,25 +1669,16 @@ PlaybackResult playFboxAnimation(FboxSource &src, bool source_self_loops)
             slot_idx = (slot_idx + 1) % RING_SLOTS;
         }
 
-        // Touch + menu dispatch.
-        handleTouch();
-        bool cur = (touchZ > 0);
-        bool wasOpen = g_pbc.menu_open;
-        if (cur && !last_touch_active) {
-            if (!g_pbc.menu_open) g_pbc.menu_open = true;
-            else                  pb_handle_tap(g_pbc, touchX, touchY);
-        }
-        // Continuous slider drags (only when the menu was already open, so the
-        // gesture that opens the menu can't also fling a slider). Live (no
-        // flash) per frame; persist once on release.
-        if (cur && wasOpen) {
-            if (pb_rect_contains(PB_VOL_X, PB_VOL_Y, PB_VOL_W, PB_VOL_H, touchX, touchY))
-                setI2SVolumeLive(pb_vol_pct_from_x(touchX));
-            if (pb_rect_contains(PB_VOL_X, PB_BRT_Y, PB_VOL_W, PB_VOL_H, touchX, touchY))
-                setDisplayBrightnessLive(pb_vol_pct_from_x(touchX));
-        }
-        if (!cur && last_touch_active) { commitI2SVolume(); commitDisplayBrightness(); }
-        last_touch_active = cur;
+        // Precise pacing: target = anchor + (pacing_index + 1) × TICK_HZ / fps.
+        // Integer truncation per-iteration loses at most one tick; the absolute
+        // target is recomputed each frame so cumulative drift is zero. We sleep
+        // to that target inside pb_paced_wait, which samples touch + the menu
+        // every ~20 ms along the way (so a 1 fps clip is still responsive) and
+        // only recomposites the held frame when an interaction changed it.
+        pacing_index++;
+        TickType_t target = pacing_anchor +
+            (TickType_t)(((uint64_t)pacing_index * configTICK_RATE_HZ) / hdr.fps);
+        pb_paced_wait(g_pbc, target, held_slot, last_touch_active);
 
         if (g_pbc.stop_requested) {
             Serial.printf("[ANIM] consumer exit: USER_CANCELLED at frame_idx=%u drawn=%u\n",
@@ -1640,22 +1693,6 @@ PlaybackResult playFboxAnimation(FboxSource &src, bool source_self_loops)
             result = PlaybackResult::USER_RESTART;
             consumer_running = false;
             break;
-        }
-
-        // Precise pacing: target = anchor + (pacing_index + 1) × TICK_HZ / fps.
-        // Integer truncation per-iteration loses at most one tick; the absolute
-        // target is recomputed each frame so cumulative drift is zero.
-        pacing_index++;
-        TickType_t target = pacing_anchor +
-            (TickType_t)(((uint64_t)pacing_index * configTICK_RATE_HZ) / hdr.fps);
-        int32_t inc = (int32_t)(target - prev_wake);
-        if (inc > 0) {
-            vTaskDelayUntil(&prev_wake, (TickType_t)inc);
-        } else {
-            // We're behind schedule (decode/SPI overran or the producer was
-            // briefly starved). Skip the wait and advance prev_wake so the
-            // next iteration's math stays in sync with the anchor.
-            prev_wake = target;
         }
     }
 

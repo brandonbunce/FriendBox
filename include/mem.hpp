@@ -36,8 +36,9 @@ void memReport(const char *tag);
 // Reserved playback scratch pool
 // ---------------------------------------------------------------------------
 // Reserve the playback internals once (idempotent), while internal RAM is still
-// pristine/contiguous at boot: the 115 KB decode buffer AND the 16 KB fbox_dec
-// producer task stack. Both are reused across every playback and never freed.
+// pristine/contiguous at boot: the 115 KB decode buffer, the 16 KB fbox_dec
+// producer task stack, AND the 8 KB i2s_wr writer task stack. All are reused
+// across every playback/SFX session and never freed.
 // Returns true if the decode buffer was reserved. Call right after memInit().
 bool   memReservePlaybackScratch();
 // The pinned internal scratch buffer, or nullptr if the reservation failed.
@@ -54,6 +55,14 @@ size_t memPlaybackScratchSize();
 void  *memProducerStack();
 size_t memProducerStackWords();
 void  *memProducerTCB();
+
+// Reserved i2s_wr writer-task resources, same rationale as the producer above:
+// the UI SFX session spawns the writer during boot (WiFi/TLS active), when a
+// dynamic 8 KB internal stack alloc fails. memI2SWriterStack() is nullptr if the
+// reservation failed (caller falls back to a dynamic xTaskCreate).
+void  *memI2SWriterStack();
+size_t memI2SWriterStackWords();
+void  *memI2SWriterTCB();
 
 // ---------------------------------------------------------------------------
 // Eviction registry ("clear unneeded assets")
